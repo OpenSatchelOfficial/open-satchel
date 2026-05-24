@@ -44,12 +44,21 @@ export default function AboutDialog({ onClose }: Props) {
   const [updateBusy, setUpdateBusy] = useState(false)
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null)
   const [updateStatus, setUpdateStatus] = useState<Status | null>(null)
+  const [appVersion, setAppVersion] = useState('0.1.0')
 
   useEffect(() => {
     void invoke<LicenseInfo | null>('license_status')
       .then((info) => setLicense(info ?? null))
       .catch(() => {
         // Silent — the app falls back to Public Edition.
+      })
+  }, [])
+
+  useEffect(() => {
+    void invoke<string>('app_version')
+      .then((version) => setAppVersion(version))
+      .catch(() => {
+        // Keep the build-time fallback if the runtime command is unavailable.
       })
   }, [])
 
@@ -205,7 +214,7 @@ export default function AboutDialog({ onClose }: Props) {
                 textTransform: 'uppercase',
               }}
             >
-              v0.1.0 · {editionLabel}
+              v{appVersion} · {editionLabel}
             </div>
           </div>
           <button
