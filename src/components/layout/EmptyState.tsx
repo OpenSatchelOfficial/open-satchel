@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react'
-import { recentApi, pinnedApi, folderFavoritesApi, dirnameOf, fileApi, type RecentEntry } from '../../lib/ipc'
+import { appApi, recentApi, pinnedApi, folderFavoritesApi, dirnameOf, fileApi, type RecentEntry } from '../../lib/ipc'
 import { openFile, openFromPath } from '../../lib/actions'
 import { I, type IconName } from '../icons'
 import Logo from '../Logo'
@@ -22,12 +22,17 @@ export default function EmptyState() {
   const [dragOver, setDragOver] = useState(false)
   const [pinned, setPinned] = useState<Set<string>>(() => new Set(pinnedApi.get()))
   const [folderFavs, setFolderFavs] = useState<string[]>(() => folderFavoritesApi.get())
+  const [version, setVersion] = useState('0.1.0')
   // Subscribe to locale changes so the t() calls below re-render
   // immediately when the user flips the dropdown in Preferences.
   useLocale()
   // Tour auto-shows once on a fresh install (no recents in storage).
   // After dismissal, localStorage prevents replay.
   const [tourOpen, setTourOpen] = useState(false)
+
+  useEffect(() => {
+    void appApi.version().then(setVersion).catch(() => {})
+  }, [])
 
   useEffect(() => {
     recentApi
@@ -190,7 +195,7 @@ export default function EmptyState() {
                 letterSpacing: 0.6,
               }}
             >
-              <span>v0.1.0 · m1 scaffold</span>
+              <span>v{version} · m1 scaffold</span>
               <span>·</span>
               <span>tauri 2 + rust</span>
               <span>·</span>

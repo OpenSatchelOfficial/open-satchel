@@ -5,6 +5,7 @@ import type { AccentName, DensityName, LayoutMode, ThemeName } from '../../types
 import ShortcutsPanel from './ShortcutsPanel'
 import { getLocale, setLocale, SUPPORTED_LOCALES, type Locale } from '../../lib/i18n'
 import { isFullscreen, setFullscreen } from '../../lib/fullscreen'
+import { appApi } from '../../lib/ipc'
 
 const ACCENT_SWATCHES: { id: AccentName; label: string; hex: string }[] = [
   { id: 'amber',  label: 'Burnt amber', hex: 'oklch(66% 0.155 52)' },
@@ -30,6 +31,7 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
   const setShowAnnotationGutter = useUIStore((s) => s.setShowAnnotationGutter)
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [locale, setLocaleState] = useState<Locale>(() => getLocale())
+  const [version, setVersion] = useState('0.1.0')
   // Fullscreen lives on the OS window (Tauri owns it), so we read it
   // on mount + sync to the segmented control. Polling once on mount is
   // enough since the user changes it from THIS panel; if they hit
@@ -38,6 +40,9 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
   const [windowMode, setWindowMode] = useState<'window' | 'fullscreen'>('window')
   useEffect(() => {
     void isFullscreen().then((fs) => setWindowMode(fs ? 'fullscreen' : 'window'))
+  }, [])
+  useEffect(() => {
+    void appApi.version().then(setVersion).catch(() => {})
   }, [])
   const changeWindowMode = (mode: 'window' | 'fullscreen') => {
     setWindowMode(mode)
@@ -262,7 +267,7 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
         >
           <span>Synced across all open documents</span>
           <span className="os-mono" style={{ fontSize: 10, letterSpacing: 0.4 }}>
-            v0.1.0
+            v{version}
           </span>
         </div>
       </div>
