@@ -1,0 +1,8 @@
+# Placeholder so git tracks the resource directory.
+#
+# The actual pdfium shared library (pdfium.dll / libpdfium.so /
+# libpdfium.dylib) is downloaded by `scripts/install-pdfium.mjs` —
+# wired into npm's `postinstall`, `pretauri:dev`, and `pretauri:build`
+# lifecycle hooks. Tauri bundles whatever is in this directory into
+# the released app via the `bundle.resources` entry in
+# tauri.conf.json.

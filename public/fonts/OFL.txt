@@ -1,0 +1,15 @@
+The fonts bundled in this directory are licensed under the
+SIL Open Font License, Version 1.1 (OFL-1.1).
+
+- Inter Tight — Copyright 2020 The Inter Project Authors
+  (https://github.com/rsms/inter)
+- JetBrains Mono — Copyright 2020 The JetBrains Mono Project Authors
+  (https://github.com/JetBrains/JetBrainsMono)
+- Newsreader — Copyright 2020 The Newsreader Project Authors
+  (https://github.com/productiontype/newsreader)
+
+Full OFL text: https://openfontlicense.org/open-font-license-official-text/
+
+These fonts are free to use, distribute, and modify under the OFL.
+They are bundled here for air-gap deployment and CSP compliance so that
+the app does not need to contact any external font CDN at runtime.

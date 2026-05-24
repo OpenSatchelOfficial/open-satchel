@@ -1,0 +1,300 @@
+/* Open Satchel — design tokens (Redesign v2).
+ *
+ * Two equally polished themes: warm paper light + crisp ink dark.
+ * Burnt-amber accent by default; user-swappable to forest/iris/ink via
+ * Preferences. Density compact|balanced|roomy maps to layout heights and
+ * type scale.
+ *
+ * Token strategy:
+ *   - The redesign-v2 names (--bg-app, --ink, --line, --accent, etc.) are
+ *     authoritative.
+ *   - Legacy names from the previous Fluent-style shell (--bg-primary,
+ *     --text-primary, --hairline, --border, --accent-soft, etc.) are
+ *     mapped as aliases so dialogs, toolbars, and per-format components
+ *     keep rendering until they migrate to the new names organically.
+ *   - The accent is set by JS at runtime (via Preferences) using
+ *     setProperty(..., "important") to override the dark-theme override.
+ */
+
+:root,
+[data-theme="light"] {
+  /* Warm paper — slightly creamy, not pure white */
+  --bg-app:        oklch(97.2% 0.008 82);
+  --bg-chrome:     oklch(98.6% 0.006 82);
+  --bg-surface:    oklch(99.4% 0.004 82);
+  --bg-sunken:     oklch(95.5% 0.010 82);
+  --bg-hover:      oklch(94.0% 0.012 80);
+  --bg-active:     oklch(91.5% 0.016 78);
+  --bg-elevated:   oklch(99.4% 0.004 82);
+  --bg-press:      oklch(91.5% 0.016 78);
+
+  --ink:           oklch(22% 0.018 60);
+  --ink-2:         oklch(38% 0.014 60);
+  --ink-3:         oklch(55% 0.010 65);
+  --ink-4:         oklch(70% 0.008 70);
+
+  --line:          oklch(89.5% 0.012 78);
+  --line-strong:   oklch(82% 0.014 75);
+
+  --accent:        oklch(66% 0.155 52);     /* burnt amber */
+  --accent-ink:    oklch(99% 0.005 80);
+  --accent-tint:   oklch(94% 0.040 65);
+  --accent-hover:  oklch(60% 0.165 50);
+
+  --good:          oklch(60% 0.13 155);
+  --warn:          oklch(72% 0.16 75);
+  --bad:           oklch(58% 0.19 28);
+
+  --shadow-sm: 0 1px 0 oklch(60% 0.02 70 / 0.05), 0 1px 2px oklch(20% 0.02 70 / 0.06);
+  --shadow-md: 0 1px 0 oklch(60% 0.02 70 / 0.04), 0 4px 14px oklch(20% 0.02 70 / 0.08);
+  --shadow-lg: 0 1px 0 oklch(60% 0.02 70 / 0.04), 0 12px 32px oklch(20% 0.02 70 / 0.16);
+  --shadow-page: 0 1px 0 oklch(60% 0.02 70 / 0.05), 0 12px 40px -8px oklch(20% 0.02 70 / 0.18);
+
+  /* Legacy aliases — kept until per-format components migrate */
+  --bg-primary:    var(--bg-app);
+  --bg-secondary:  var(--bg-chrome);
+  --text-primary:  var(--ink);
+  --text-secondary: var(--ink-2);
+  --text-muted:    var(--ink-3);
+  --hairline:      var(--line);
+  --border:        var(--line);
+  --border-strong: var(--line-strong);
+  --accent-fg:     var(--accent-ink);
+  --accent-on-dark: var(--accent);
+  --accent-soft:   var(--accent-tint);
+  --ring:          color-mix(in oklch, var(--accent) 45%, transparent);
+  --danger:        var(--bad);
+  --success:       var(--good);
+  --warning:       var(--warn);
+  --info:          oklch(56% 0.16 240);
+  --shadow-pop:    var(--shadow-lg);
+  --gradient-ribbon: linear-gradient(180deg, var(--bg-chrome) 0%, var(--bg-chrome) 100%);
+  --tab-active-fg: var(--ink);
+}
+
+[data-theme="dark"] {
+  --bg-app:        oklch(16% 0.012 258);
+  --bg-chrome:     oklch(19% 0.014 258);
+  --bg-surface:    oklch(22% 0.014 258);
+  --bg-sunken:     oklch(14% 0.012 258);
+  --bg-hover:      oklch(26% 0.016 258);
+  --bg-active:     oklch(30% 0.018 258);
+  --bg-elevated:   oklch(22% 0.014 258);
+  --bg-press:      oklch(30% 0.018 258);
+
+  --ink:           oklch(94% 0.006 82);
+  --ink-2:         oklch(78% 0.010 80);
+  --ink-3:         oklch(62% 0.012 78);
+  --ink-4:         oklch(48% 0.014 75);
+
+  --line:          oklch(28% 0.014 258);
+  --line-strong:   oklch(38% 0.018 258);
+
+  --accent:        oklch(75% 0.155 60);
+  --accent-ink:    oklch(18% 0.020 60);
+  --accent-tint:   oklch(34% 0.060 55);
+  --accent-hover:  oklch(80% 0.150 60);
+
+  --good:          oklch(72% 0.14 155);
+  --warn:          oklch(80% 0.16 80);
+  --bad:           oklch(70% 0.18 25);
+
+  --shadow-sm: 0 1px 0 oklch(0% 0 0 / 0.3), 0 1px 2px oklch(0% 0 0 / 0.35);
+  --shadow-md: 0 1px 0 oklch(0% 0 0 / 0.25), 0 6px 18px oklch(0% 0 0 / 0.45);
+  --shadow-lg: 0 1px 0 oklch(0% 0 0 / 0.3), 0 16px 50px -8px oklch(0% 0 0 / 0.55);
+  --shadow-page: 0 1px 0 oklch(0% 0 0 / 0.3), 0 16px 50px -8px oklch(0% 0 0 / 0.55);
+
+  --info:          oklch(72% 0.16 240);
+}
+
+/* ───── Density ───── */
+[data-density="compact"] {
+  --row: 28px;
+  --row-sm: 22px;
+  --pad: 8px;
+  --pad-lg: 12px;
+  --toolbar-h: 36px;
+  --tabbar-h: 30px;
+  --statusbar-h: 22px;
+  --ribbon-h: 64px;
+  --rail-w: 52px;
+  --sidebar-w: 232px;
+  --gutter-w: 220px;
+  --fs-meta: 10.5px;
+  --fs-ui: 12px;
+  --fs-body: 13px;
+  --toolbar-height:   var(--toolbar-h);
+  --tabbar-height:    var(--tabbar-h);
+  --ribbon-height:    var(--ribbon-h);
+  --statusbar-height: var(--statusbar-h);
+  --sidebar-width:    var(--sidebar-w);
+  --rb-h: 24px;
+  --rb-fs: 11px;
+  --rb-pad: 0 8px;
+  --rb-gap: 3px;
+  --rb-icon: 14px;
+}
+[data-density="balanced"] {
+  --row: 32px;
+  --row-sm: 26px;
+  --pad: 10px;
+  --pad-lg: 14px;
+  --toolbar-h: 42px;
+  --tabbar-h: 34px;
+  --statusbar-h: 26px;
+  --ribbon-h: 72px;
+  --rail-w: 60px;
+  --sidebar-w: 248px;
+  --gutter-w: 240px;
+  --fs-meta: 11px;
+  --fs-ui: 13px;
+  --fs-body: 14px;
+  --toolbar-height:   var(--toolbar-h);
+  --tabbar-height:    var(--tabbar-h);
+  --ribbon-height:    var(--ribbon-h);
+  --statusbar-height: var(--statusbar-h);
+  --sidebar-width:    var(--sidebar-w);
+  --rb-h: 28px;
+  --rb-fs: 12px;
+  --rb-pad: 0 12px;
+  --rb-gap: 4px;
+  --rb-icon: 16px;
+}
+[data-density="roomy"] {
+  --row: 36px;
+  --row-sm: 30px;
+  --pad: 12px;
+  --pad-lg: 18px;
+  --toolbar-h: 48px;
+  --tabbar-h: 38px;
+  --statusbar-h: 30px;
+  --ribbon-h: 80px;
+  --rail-w: 68px;
+  --sidebar-w: 264px;
+  --gutter-w: 260px;
+  --fs-meta: 11.5px;
+  --fs-ui: 13.5px;
+  --fs-body: 14.5px;
+  --toolbar-height:   var(--toolbar-h);
+  --tabbar-height:    var(--tabbar-h);
+  --ribbon-height:    var(--ribbon-h);
+  --statusbar-height: var(--statusbar-h);
+  --sidebar-width:    var(--sidebar-w);
+  --rb-h: 32px;
+  --rb-fs: 13px;
+  --rb-pad: 0 14px;
+  --rb-gap: 5px;
+  --rb-icon: 18px;
+}
+
+/* ───── Type ───── */
+:root {
+  font-family: "Inter Tight", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", Roboto, sans-serif;
+  font-size: var(--fs-body, 13px);
+  font-feature-settings: "ss01", "cv11";
+  -webkit-font-smoothing: antialiased;
+  color: var(--ink);
+  background: var(--bg-app);
+}
+[data-theme="light"] { color-scheme: light; }
+[data-theme="dark"]  { color-scheme: dark; }
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--ink);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  border-radius: 4px;
+}
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.os-mono { font-family: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace; }
+.os-serif { font-family: "Newsreader", Georgia, serif; }
+
+kbd, .os-kbd {
+  font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: var(--bg-surface);
+  color: var(--ink-2);
+}
+
+/* pdfjs text layer needs this for selection-position alignment when scaled. */
+.pdfjs-container {
+  --scale-factor: 1;
+}
+
+/* ───── Subtle paper grain ───── */
+[data-theme="light"] .os-paper-grain {
+  background-image:
+    radial-gradient(oklch(50% 0.02 70 / 0.025) 1px, transparent 1px),
+    radial-gradient(oklch(50% 0.02 70 / 0.020) 1px, transparent 1px);
+  background-size: 7px 7px, 13px 13px;
+  background-position: 0 0, 3px 4px;
+}
+[data-theme="dark"] .os-paper-grain {
+  background-image: radial-gradient(oklch(80% 0.02 70 / 0.014) 1px, transparent 1px);
+  background-size: 9px 9px;
+}
+
+/* ───── Custom scrollbars ───── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--line-strong); background-clip: padding-box; border: 2px solid transparent; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+/* ───── Generic chrome bits ───── */
+.os-divider { width: 1px; align-self: stretch; background: var(--line); }
+.os-spacer { flex: 1; }
+
+/* ───── Shared button surfaces (used by EmptyState etc.) ───── */
+.btn-primary {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+.btn-primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn-primary:disabled { opacity: 0.55; cursor: default; }
+
+.btn-ghost {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  background: var(--bg-surface);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.btn-ghost:hover { background: var(--bg-hover); border-color: var(--line-strong); }
+.btn-ghost:disabled { opacity: 0.5; cursor: default; }

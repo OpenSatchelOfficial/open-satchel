@@ -1,0 +1,66 @@
+# Node
+node_modules
+dist
+dist-ssr
+*.local
+*.tsbuildinfo
+
+# Tesseract.js auto-downloads language models to cwd at runtime.
+# These are 5–22 MB binaries — never check them in.
+*.traineddata
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen
+
+# pdfium shared library — downloaded per-platform by
+# `scripts/install-pdfium.mjs`. Not redistributable to git (BSD-3 but
+# ~10 MB and tracks bblanchon's release cadence). Tauri bundles
+# whatever is here into the .msi / .dmg / .AppImage at build time.
+src-tauri/resources/pdfium/pdfium.dll
+src-tauri/resources/pdfium/libpdfium.so
+src-tauri/resources/pdfium/libpdfium.dylib
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+!.vscode/tasks.json
+.idea
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Test output
+coverage
+.nyc_output
+
+# Commercial licensing system signing material.
+#   - The PRIVATE key lives OUTSIDE this repo entirely. If a key file
+#     ever appears here, that's a mistake — move it out and never commit.
+#   - The PUBLIC key at src-tauri/keys/license_pubkey.pem IS committed
+#     and gets embedded into the binary at compile time via include_bytes!()
+#     for offline license verification.
+src-tauri/keys/license_signing_key.pem
+src-tauri/keys/*.priv.pem
+src-tauri/keys/*signing_key*.pem
+*signing_key.pem
+*.priv.pem
+
+# Tauri updater private keys. The updater PUBLIC key is embedded in
+# src-tauri/tauri.conf.json; private signing keys must live in a secret
+# manager or outside the repository.
+*updater*.key
+tauri-updater.key

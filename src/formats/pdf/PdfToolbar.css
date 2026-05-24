@@ -1,0 +1,305 @@
+/* PDF ribbon — Redesign v2 visual language.
+ *
+ * Chip-shape tab strip (pills, accent-filled when active), mono UPPERCASE
+ * group labels, hairline-separated tool columns. Spatially identical to
+ * the prior Fluent-style ribbon — same .rb-* / .rgrp markup, same drag-
+ * to-reorder behaviour — just re-skinned to match the new chrome.
+ *
+ * Token contract (see src/styles/global.css):
+ *   --bg-chrome / --bg-hover / --bg-active  background ramp
+ *   --ink / --ink-2 / --ink-3 / --ink-4     ink ramp
+ *   --line / --line-strong                  hairlines
+ *   --accent / --accent-ink / --accent-tint chips when selected
+ *   --rb-h / --rb-fs / --rb-pad / --rb-gap  density-driven primitives
+ *   --ribbon-h                              minimum ribbon height (var
+ *                                            with density)
+ */
+
+.rb-root {
+  background: var(--bg-chrome);
+  color: var(--ink);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ───── Chip-tab strip ───── */
+
+.rb-tabs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+  background: var(--bg-chrome);
+  position: relative;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.rb-tabs::-webkit-scrollbar { height: 6px; }
+
+.rb-tab {
+  appearance: none;
+  height: 24px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: grab;
+  user-select: none;
+  position: relative;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.rb-tab:hover:not(.active) {
+  background: var(--bg-hover);
+  border-color: var(--line);
+  color: var(--ink);
+}
+
+.rb-tab.active {
+  background: var(--accent);
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rb-tab.drop-target {
+  background: var(--bg-active);
+  border-color: var(--accent);
+}
+
+.rb-tab.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+/* Reset the legacy underline pseudo — chip fill IS the active state. */
+.rb-tab.active::after,
+.rb-tab.drop-target::after {
+  content: none;
+}
+
+/* ───── Tool strip ───── */
+
+.rb-body {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex: 1;
+  padding: 0 8px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--bg-chrome);
+  min-height: var(--ribbon-h);
+  animation: rbTabIn 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes rbTabIn {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ───── Group ───── */
+
+.rgrp {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 6px 12px;
+  gap: 4px;
+  position: relative;
+  flex-shrink: 0;
+  /* Hairlines between groups via the right border; the last group's
+     border is suppressed below. */
+  border-right: 1px solid var(--line);
+}
+
+.rgrp:last-child {
+  border-right: 0;
+}
+
+.rgrp-row {
+  display: flex;
+  gap: var(--rb-gap);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Mono UPPERCASE group label — distinct from the prior Fluent
+ * caption that sat above the row. Now sits BELOW the tools as a
+ * spec-style label, paddings tuned to read as metadata not a
+ * heading. */
+.rgrp-label {
+  font-family: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 9px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-left: 4px;
+  margin-top: 2px;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* ───── Ribbon button (RBtn) — base ─────
+ * Two visual modes share .rbtn:
+ *   - Text-only (legacy):     `.rbtn` alone — short pill for B/I/U, dropdowns
+ *   - Icon-above-label tile:  `.rbtn.rbtn-tile` — 56×40 chip with 16px icon
+ *                              on top + 9.5px label below + accent kbd badge
+ * Selected/active: border-strong + bg-active + accent ink (matches the
+ * Open Satchel Redesign v2 spec). */
+
+.rbtn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: var(--rb-h, 28px);
+  padding: 0 10px;
+  background: transparent;
+  color: var(--ink-2, var(--text-primary));
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: var(--rb-fs, 12px);
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.rbtn:hover:not(.active) {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+  border-color: var(--line, rgba(127, 127, 127, 0.2));
+  color: var(--ink, var(--text-primary));
+}
+
+.rbtn.active {
+  background: var(--bg-active, rgba(127, 127, 127, 0.16));
+  border-color: var(--line-strong, rgba(127, 127, 127, 0.35));
+  color: var(--accent, var(--accent-color, #d97706));
+  font-weight: 600;
+}
+
+.rbtn:focus-visible {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring, rgba(217, 119, 6, 0.25));
+}
+
+/* Icon-above-label tile (the main ribbon visual). 56×40 with 16px icon
+ * stacked over a 9.5px label. The .rbtn-label span lets us tighten
+ * line-height + ellipsis the label without affecting other text-only
+ * .rbtn instances elsewhere in the app (PasswordDialog, CertEncrypt). */
+.rbtn.rbtn-tile {
+  width: 56px;
+  height: 40px;
+  padding: 4px 4px 3px;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 9.5px;
+  font-weight: 500;
+  line-height: 1;
+  position: relative;
+}
+
+.rbtn.rbtn-tile .rbtn-label {
+  display: block;
+  max-width: 50px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+}
+
+.rbtn.rbtn-tile.active .rbtn-label {
+  color: var(--accent);
+}
+
+/* Text-only buttons keep .rbtn-label as a transparent inline-block so
+ * existing markup doesn't shift visually. */
+.rbtn:not(.rbtn-tile) .rbtn-label {
+  display: inline;
+}
+
+/* ───── Small rbtn variant (used for stamps, etc.) ───── */
+
+.rbtn.rbtn-small {
+  height: calc(var(--rb-h) - 4px);
+  padding: 0 8px;
+  font-size: calc(var(--rb-fs) - 1px);
+}
+
+/* When a small button also has an icon, render as 48×36 mini-tile. */
+.rbtn.rbtn-small.rbtn-tile {
+  width: 48px;
+  height: 36px;
+  padding: 3px 3px 2px;
+}
+
+/* ───── Inline form controls inside the ribbon ───── */
+
+.rb-body select:not(.rpicker) {
+  appearance: none;
+  height: var(--rb-h);
+  padding: 0 8px;
+  background: var(--bg-surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: var(--rb-fs);
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.rb-body select:not(.rpicker):hover  { border-color: var(--line-strong); }
+.rb-body select:not(.rpicker):focus  {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}
+
+.rb-body input[type='color'] {
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 0;
+  background: transparent;
+}
+
+.rb-body input[type='range'] { accent-color: var(--accent); }
+
+.rb-body input[type='text'],
+.rb-body input[type='number'] {
+  background: var(--bg-surface);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: var(--rb-fs);
+}
+.rb-body input[type='text']:focus,
+.rb-body input[type='number']:focus {
+  outline: 0;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--ring);
+}

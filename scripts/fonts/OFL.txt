@@ -1,0 +1,8 @@
+Noto Sans Regular is bundled here as a small embedded-font test fixture.
+
+- Font: Noto Sans Regular
+- Copyright: The Noto Project Authors
+- License: SIL Open Font License, Version 1.1
+- Upstream: https://github.com/notofonts/noto-fonts
+
+Full OFL text: https://openfontlicense.org/open-font-license-official-text/

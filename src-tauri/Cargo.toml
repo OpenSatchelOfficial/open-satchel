@@ -1,0 +1,126 @@
+[package]
+name = "open-satchel"
+version = "0.1.0"
+description = "Free, local, no-paywall universal file editor"
+authors = ["Open Satchel"]
+edition = "2021"
+rust-version = "1.77"
+license = "AGPL-3.0-only"
+# Without this, `cargo run` is ambiguous because src/bin/ carries the
+# pdfium worker process. Tauri invokes `cargo run` plain during dev —
+# it must resolve to the main Tauri app, not the worker binary.
+default-run = "open-satchel"
+
+# The `_lib` name is what Tauri's mobile/desktop entry points import.
+[lib]
+name = "open_satchel_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-dialog = "2.0"
+tauri-plugin-fs = "2.0"
+tauri-plugin-shell = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+# Font subsystem — pure-Rust ttf/otf parsing + walkdir for font scans.
+# No native C deps, keeps the Windows build clean.
+ttf-parser = "0.25"
+walkdir = "2"
+uuid = { version = "1", features = ["v4"] }
+# Pure-Rust font subsetter (Typst team). Replaces pd-lib's built-in
+# subsetter for CJK/Arabic — pd-lib drops glyphs from dense cmaps and
+# mangles GSUB/GPOS, producing empty Arabic and sparse Chinese. subsetter
+# preserves glyph outlines + referenced layout tables.
+subsetter = "0.2"
+# HTTP client used by the TSA command. RFC 3161 TSA endpoints and the
+# OCSP/CRL endpoints for LTV don't send CORS headers, so the WebView2
+# fetch() blocks them in the frontend. This routes those specific
+# requests through a native Rust path, sidestepping CORS entirely.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# File-system watcher for hot-folder batch triggers. Cross-platform;
+# uses ReadDirectoryChangesW on Windows, inotify on Linux, FSEvents on
+# macOS. `debouncer` wraps the raw stream with a coalescing timer so
+# half-written files aren't picked up until they finish landing.
+notify = "7"
+notify-debouncer-full = "0.4"
+# CLI argument parser. Registered via tauri-plugin-cli so Tauri's
+# bundler sets up the subcommand + flag scaffolding; we read matches
+# in setup() and dispatch.
+tauri-plugin-cli = "2.0"
+# PKCS#11 v2.40 wrapper. Loads any compliant PKCS#11 module (DLL/SO/
+# DYLIB) at runtime — SoftHSM2 for dev/CI, YubiKey's ykcs11.dll for
+# hardware verification, Thales/nCipher drivers for enterprise HSMs
+# with no code changes. Used by the signature path to delegate the
+# private-key RSA-sign to a hardware token.
+cryptoki = "0.7"
+# Base64 — used to ferry PKCS#11 cert DER across the Tauri IPC
+# boundary (binary survives the bridge as a string).
+base64 = "0.22"
+# AES-256 + CBC + PKCS#7 padding for cert-based PDF body
+# encryption. Pulled in for pdf_encrypt_to_certs which walks the
+# post-pd-lib bytes and per-object encrypts streams + strings
+# under a FEK derived from the recipient seeds.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = { version = "0.4", features = ["alloc", "block-padding"] }
+rand = "0.8"
+# PDF engine: lopdf parses the object graph (xref, streams, encryption
+# readback) — used by the incremental-update writer to copy trailer
+# metadata from the source document without touching original bytes.
+# Pinned at 0.32; bump only on corpus regression retest.
+lopdf = "0.32"
+# FlateDecode/encode for content-stream patching in Session 5+. Added
+# now so Session 2 doesn't need another Cargo bump.
+flate2 = "1"
+# pdfium-render: Rust wrapper around Chrome's pdfium rendering engine
+# (BSD-3). Dynamic-loading mode — the runtime pdfium library is
+# located at startup via the PDFIUM_DYNAMIC_LIB_PATH environment
+# variable (Windows) or the platform's library search path
+# (LD_LIBRARY_PATH / DYLD_LIBRARY_PATH). Bundle pdfium with releases
+# or instruct users to install it once at a known location.
+pdfium-render = { version = "0.8", features = ["thread_safe"] }
+# PNG encoding for render output. image is already an indirect dep
+# via pdfium-render's image feature; pin explicitly so we control
+# the version.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Bounded LRU cache for the bitmap render-cache (pdfium → PNG bytes).
+# Keyed by (path, page_index, scale_quantized) so repeated requests
+# for an already-rendered page hit in <1ms instead of triggering a
+# fresh pdfium render (10–30ms per page). Sized to ~100 entries by
+# default — enough headroom for fast scroll prefetch without bloating
+# the working set.
+lru = "0.12"
+# Lazy global initialization for the shared cache instance.
+once_cell = "1"
+# Ed25519 JWT verification for the offline commercial-license check.
+# The public key embedded via include_bytes!() into the binary is the
+# only key the verifier trusts; revocation is intentionally not
+# checked online so the app works in air-gapped environments.
+jsonwebtoken = "9"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
+
+[dev-dependencies]
+# Scoped temp dirs for live-edit session tests — each test gets its
+# own sessions_root so parallel runs don't collide.
+tempfile = "3"
+
+# Release profile: maximum optimization, strip debug, LTO.
+# Matters for perf-vs-Electron story we promised the user.
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

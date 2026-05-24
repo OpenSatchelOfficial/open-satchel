@@ -1,0 +1,97 @@
+name: Build matrix (windows / macos / linux)
+
+# Cross-platform build smoke. Compiles the frontend + Rust crate on
+# each desktop target so platform-specific cfg drift is caught early.
+# Mobile targets are out of scope.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '.github/workflows/build-multiplatform.yml'
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'index.html'
+      - 'vite.config.ts'
+
+jobs:
+  build:
+    name: ${{ matrix.os }} (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: 'win-x64'
+          - os: macos-14            # Apple Silicon (arm64)
+            label: 'mac-arm64'
+          - os: macos-13            # Intel (x86_64)
+            label: 'mac-x64'
+          - os: ubuntu-22.04
+            label: 'linux-x64'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      # Tauri's Linux build needs webkit2gtk + the standard Tauri
+      # runtime libs. macOS and Windows runners have what they need
+      # out of the box.
+      - name: Install Linux Tauri prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      - name: Install npm deps
+        run: npm ci
+        # `npm ci` triggers `postinstall`, which runs
+        # scripts/install-pdfium.mjs to drop the platform-correct
+        # pdfium library into src-tauri/resources/pdfium/. Tauri
+        # bundles it into the release at build time and the Rust
+        # render path picks it up at runtime via the env var set in
+        # lib.rs setup().
+
+      - name: TypeScript check (no emit)
+        run: npx tsc --noEmit
+
+      - name: Vite build
+        run: npx vite build
+
+      # The full Tauri release bundle build is heavy (signing, bundler
+      # output) and not needed for "does it compile" smoke. Just
+      # compile the Rust crate to catch any platform-specific cfg
+      # drift.
+      - name: Cargo check (Tauri Rust crate)
+        working-directory: src-tauri
+        run: cargo check --no-default-features
+
+      - name: Cargo test (lib only — no GUI required)
+        working-directory: src-tauri
+        run: cargo test --lib --no-default-features
+        env:
+          PDFIUM_SKIP_INTEGRATION: '1'

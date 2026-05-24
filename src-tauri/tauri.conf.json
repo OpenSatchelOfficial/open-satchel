@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Open Satchel",
+  "version": "0.1.0",
+  "identifier": "dev.opensatchel.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "Open Satchel",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": true,
+        "transparent": false,
+        "fullscreen": false,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/pdfium/*"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Free, local PDF editor",
+    "longDescription": "A free, local-first PDF editor for editing, signing, redaction, forms, OCR, compression, and document cleanup without subscriptions, accounts, or cloud uploads."
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBNTY1ODA1RjcwRDBFQUYKUldTdkRnMzNCVmhXNnNGU2h4SE1vZUdZaGhNTTZ2OFVLQjhWbGFHbUUyTURIaTdjakEwYWNMdGoK",
+      "endpoints": [
+        "https://github.com/OpenSatchelOfficial/open-satchel/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
+    "cli": {
+      "description": "Open Satchel — headless action runner",
+      "longDescription": "Run an action workflow from the command line. Use --action <file.action.json> with --input <file-or-folder> to batch-process without opening the UI.",
+      "args": [
+        {
+          "name": "action",
+          "short": "a",
+          "description": "Path to an .action.json file defining the workflow",
+          "takesValue": true
+        },
+        {
+          "name": "input",
+          "short": "i",
+          "description": "Input file or folder to run the action on",
+          "takesValue": true
+        }
+      ]
+    }
+  }
+}
