@@ -64,3 +64,8 @@ npm run tauri:build
 
 The installed app checks for updates on startup and exposes a manual
 check in About -> Updates.
+
+For temporary canary drills that include the Windows MSI bundle, keep
+the app version's prerelease identifier numeric, for example `0.1.0-1`
+then `0.1.0-2`. WiX rejects non-numeric prerelease labels such as
+`0.1.0-canary.1` even though they are valid SemVer.
