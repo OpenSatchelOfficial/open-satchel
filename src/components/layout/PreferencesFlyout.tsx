@@ -6,6 +6,13 @@ import ShortcutsPanel from './ShortcutsPanel'
 import { getLocale, setLocale, SUPPORTED_LOCALES, type Locale } from '../../lib/i18n'
 import { isFullscreen, setFullscreen } from '../../lib/fullscreen'
 import { appApi } from '../../lib/ipc'
+import {
+  checkForAppUpdate,
+  humanUpdateError,
+  installPendingAppUpdate,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+} from '../../services/appUpdater'
 
 const ACCENT_SWATCHES: { id: AccentName; label: string; hex: string }[] = [
   { id: 'amber',  label: 'Burnt amber', hex: 'oklch(66% 0.155 52)' },
@@ -13,6 +20,10 @@ const ACCENT_SWATCHES: { id: AccentName; label: string; hex: string }[] = [
   { id: 'iris',   label: 'Iris',        hex: 'oklch(56% 0.16 290)' },
   { id: 'ink',    label: 'Ink',         hex: 'oklch(28% 0.02 260)' },
 ]
+
+type Status =
+  | { kind: 'ok'; message: string }
+  | { kind: 'err'; message: string }
 
 /** In-app Preferences flyout — anchored under the gear button on the
  *  toolbar. Closes on Escape or click-outside. Writes directly to
@@ -32,6 +43,9 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
   const [locale, setLocaleState] = useState<Locale>(() => getLocale())
   const [version, setVersion] = useState('0.1.0')
+  const [updateAction, setUpdateAction] = useState<'checking' | 'installing' | null>(null)
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<Status | null>(null)
   // Fullscreen lives on the OS window (Tauri owns it), so we read it
   // on mount + sync to the segmented control. Polling once on mount is
   // enough since the user changes it from THIS panel; if they hit
@@ -51,6 +65,43 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
   const changeLocale = (loc: Locale) => {
     setLocale(loc)
     setLocaleState(loc)
+  }
+
+  const checkForUpdates = async () => {
+    setUpdateStatus(null)
+    setUpdateAction('checking')
+    try {
+      const result = await checkForAppUpdate()
+      if (result.kind === 'available') {
+        setAvailableUpdate(result.update)
+        setUpdateStatus({
+          kind: 'ok',
+          message: `Update ${result.update.version} is ready to install.`,
+        })
+      } else {
+        setAvailableUpdate(null)
+        setUpdateStatus({ kind: 'ok', message: 'Open Satchel is up to date.' })
+      }
+    } catch (e: unknown) {
+      setUpdateStatus({ kind: 'err', message: humanUpdateError(e) })
+    } finally {
+      setUpdateAction(null)
+    }
+  }
+
+  const installUpdate = async () => {
+    if (!availableUpdate) return
+    setUpdateAction('installing')
+    setUpdateStatus({ kind: 'ok', message: 'Preparing update...' })
+    try {
+      await installPendingAppUpdate((progress) => {
+        setUpdateStatus({ kind: 'ok', message: updateProgressMessage(progress) })
+      })
+    } catch (e: unknown) {
+      setUpdateStatus({ kind: 'err', message: humanUpdateError(e) })
+    } finally {
+      setUpdateAction(null)
+    }
   }
 
   useEffect(() => {
@@ -75,12 +126,15 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
           top: 'calc(100% + 8px)',
           right: 0,
           width: 320,
+          maxWidth: 'calc(100vw - 16px)',
+          maxHeight: 'calc(100vh - var(--toolbar-h) - 16px)',
           background: 'var(--bg-surface)',
           border: '1px solid var(--line-strong)',
           borderRadius: 10,
           boxShadow: 'var(--shadow-lg)',
           zIndex: 50,
-          overflow: 'hidden',
+          overflowX: 'hidden',
+          overflowY: 'auto',
         }}
       >
         <div
@@ -230,6 +284,44 @@ export default function PreferencesFlyout({ onClose }: { onClose: () => void }) 
                 </option>
               ))}
             </select>
+          </PrefRow>
+        </PrefSection>
+
+        <PrefSection label="Updates">
+          <PrefRow label="App updates" hint={`Current version ${version}. Installs only signed release artifacts.`} stack>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                data-testid="prefs-update-check"
+                onClick={() => void checkForUpdates()}
+                disabled={updateAction !== null}
+                style={secondaryUpdateBtnStyle(updateAction !== null)}
+              >
+                {updateAction === 'checking' ? 'Checking...' : 'Check now'}
+              </button>
+              {availableUpdate && (
+                <button
+                  data-testid="prefs-update-install"
+                  onClick={() => void installUpdate()}
+                  disabled={updateAction !== null}
+                  style={primaryUpdateBtnStyle(updateAction !== null)}
+                >
+                  {updateAction === 'installing'
+                    ? 'Installing...'
+                    : `Install ${availableUpdate.version}`}
+                </button>
+              )}
+            </div>
+            {availableUpdate?.body && (
+              <div style={updateBodyStyle}>{availableUpdate.body}</div>
+            )}
+            {updateStatus && (
+              <div
+                data-testid={`prefs-update-status-${updateStatus.kind}`}
+                style={updateStatus.kind === 'ok' ? updateOkStyle : updateErrStyle}
+              >
+                {updateStatus.message}
+              </div>
+            )}
           </PrefRow>
         </PrefSection>
 
@@ -389,6 +481,85 @@ function SegGroup<T extends string>({
       })}
     </div>
   )
+}
+
+function updateProgressMessage(progress: AppUpdateProgress): string {
+  switch (progress.kind) {
+    case 'started':
+      return progress.contentLength
+        ? `Downloading ${formatBytes(progress.contentLength)}...`
+        : 'Downloading update...'
+    case 'progress':
+      return progress.contentLength
+        ? `${formatBytes(progress.downloaded)} of ${formatBytes(progress.contentLength)} downloaded`
+        : `${formatBytes(progress.downloaded)} downloaded`
+    case 'finished':
+      return 'Download complete. Installing...'
+  }
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`
+}
+
+const updateBodyStyle: CSSProperties = {
+  fontSize: 10.5,
+  color: 'var(--ink-3)',
+  lineHeight: 1.35,
+  overflowWrap: 'anywhere',
+}
+
+const updateOkStyle: CSSProperties = {
+  padding: '6px 8px',
+  borderRadius: 5,
+  background: 'var(--accent-tint)',
+  color: 'var(--ink)',
+  fontSize: 11,
+  lineHeight: 1.35,
+}
+
+const updateErrStyle: CSSProperties = {
+  padding: '6px 8px',
+  borderRadius: 5,
+  background: 'rgba(204, 51, 51, 0.12)',
+  color: 'var(--danger, #c33)',
+  fontSize: 11,
+  lineHeight: 1.35,
+}
+
+function primaryUpdateBtnStyle(disabled: boolean): CSSProperties {
+  return {
+    height: 26,
+    padding: '0 11px',
+    fontSize: 11,
+    fontWeight: 600,
+    color: 'var(--accent-ink)',
+    background: disabled ? 'var(--ink-4)' : 'var(--accent)',
+    border: '1px solid transparent',
+    borderRadius: 5,
+    cursor: disabled ? 'wait' : 'pointer',
+  }
+}
+
+function secondaryUpdateBtnStyle(disabled: boolean): CSSProperties {
+  return {
+    height: 26,
+    padding: '0 11px',
+    fontSize: 11,
+    color: 'var(--ink-2)',
+    background: 'var(--bg-surface)',
+    border: '1px solid var(--line)',
+    borderRadius: 5,
+    cursor: disabled ? 'wait' : 'pointer',
+  }
 }
 
 function Switch({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {

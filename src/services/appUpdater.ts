@@ -79,6 +79,12 @@ export function humanUpdateError(error: unknown): string {
       ? error
       : ((error as { message?: string } | null)?.message ?? String(error))
   const lower = raw.toLowerCase()
+  if (
+    (lower.includes('invoke') && lower.includes('undefined')) ||
+    lower.includes('__tauri')
+  ) {
+    return 'App updates are available in the installed desktop app.'
+  }
   if (lower.includes('signature')) {
     return 'The update signature did not verify. Nothing was installed.'
   }
