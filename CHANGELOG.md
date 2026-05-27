@@ -6,8 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.1.1] — 2026-05-27
+
 ### Added
 
+- In-app update controls in Preferences so users can manually check for,
+  download, and install signed releases without leaving Open Satchel.
 - Signed Tauri auto-updates via GitHub Releases, including startup
   update checks, an About-dialog manual update flow, updater artifact
   generation, and a release workflow that uploads `latest.json`.
