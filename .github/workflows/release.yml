@@ -47,7 +47,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: 'src-tauri -> target'
+          # Cargo workspace root is the repo root since the satchel-core
+          # split (Cargo.lock + [workspace] manifest moved there; target/
+          # is now at the repo root, not src-tauri/target).
+          workspaces: '. -> target'
 
       - name: Install Linux Tauri prerequisites
         if: matrix.platform == 'ubuntu-22.04'
