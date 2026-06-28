@@ -1,19 +1,20 @@
 import { useEffect, useState } from 'react'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useUIStore } from '../../stores/uiStore'
 import type { PdfFormatState } from './index'
 import {
-  generateSelfSignedCert, signPdf, listSignatures, verifySignatures,
-  importP12FromArrayBuffer,
-  type CertIdentity, type VerifyResult,
+  generateSelfSignedCert, listSignatures, verifySignatures,
+  importP12FromArrayBuffer, validateP12,
+  type CertIdentity, type P12ValidationInfo, type SignOptions, type VerifyResult,
 } from '../../services/pdfSign'
 import {
   listSlots, listCertificates, WELL_KNOWN_MODULES,
   type Pkcs11Slot, type Pkcs11Certificate,
 } from '../../services/pdfSignPkcs11'
-import { signPdfWithPkcs11 } from '../../services/pdfSignPkcs11Sign'
-import { composeAppearancePreview } from '../../services/pdfSignAppearance'
+import { composeAppearanceLines, composeAppearancePreview } from '../../services/pdfSignAppearance'
 import { addTrustedCert } from '../../services/pdfTrustStore'
+import { finalizeSecurityCopy } from '../../services/pdfSecurityFinalize'
 
 interface Props {
   tabId: string
@@ -24,6 +25,7 @@ interface Props {
  *  badges, supports generate + sign + certify. */
 export default function SignDialog({ tabId, onClose }: Props) {
   const state = useFormatStore((s) => s.data[tabId] as PdfFormatState | undefined)
+  const currentPage = useUIStore((s) => s.currentPage)
   const [tab, setTab] = useState<'sign' | 'verify' | 'hwtoken'>('verify')
   const [hwModulePath, setHwModulePath] = useState<string>(() => {
     const platform = typeof navigator !== 'undefined' && /windows/i.test(navigator.userAgent) ? 'win32'
@@ -62,7 +64,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
     { name: 'Sectigo', url: 'http://timestamp.sectigo.com' },
     { name: 'Entrust', url: 'http://timestamp.entrust.net/TSS/RFC3161sha2TS' },
   ]
-  const [cert, setCert] = useState<{ p12: Uint8Array; passphrase: string; certPem?: string; source: 'generated' | 'imported' } | null>(null)
+  const [cert, setCert] = useState<{ p12: Uint8Array; passphrase: string; certPem?: string; source: 'generated' | 'imported'; info?: P12ValidationInfo } | null>(null)
   /** Pending P12 bytes after file-picker, before user enters passphrase. */
   const [pendingP12, setPendingP12] = useState<{ bytes: Uint8Array; filename: string } | null>(null)
   const [p12Passphrase, setP12Passphrase] = useState('')
@@ -77,6 +79,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
   const [loadingVerify, setLoadingVerify] = useState(true)
   const [status, setStatus] = useState('')
   const [running, setRunning] = useState(false)
+  const [pendingFinalize, setPendingFinalize] = useState<'p12' | 'hw' | null>(null)
 
   const loadVerify = async () => {
     // Always pull fresh bytes from the store — `state` here is captured
@@ -108,6 +111,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
       const identity: CertIdentity = { commonName: cn, organization: org || undefined }
       const c = await generateSelfSignedCert(identity)
       setCert({ ...c, source: 'generated' })
+      setPendingFinalize(null)
       setStatus(`Certificate generated. Passphrase embedded; sign below.`)
     } catch (e) {
       setStatus(e instanceof Error ? `Error: ${e.message}` : 'Failed')
@@ -134,15 +138,18 @@ export default function SignDialog({ tabId, onClose }: Props) {
     input.click()
   }
 
-  /** Confirm the pending P12 using the typed passphrase. Validates the
-   *  passphrase by attempting to parse the PKCS#12 structure; zga will
-   *  reject an invalid one at sign time with "Invalid PKCS#12 password". */
+  /** Confirm the pending P12 using the typed passphrase. This parses the
+   *  PKCS#12 immediately so a wrong passphrase never becomes the active cert. */
   const confirmP12 = () => {
     if (!pendingP12) return
     try {
       const p12 = importP12FromArrayBuffer(pendingP12.bytes.buffer)
-      setCert({ p12, passphrase: p12Passphrase, source: 'imported' })
-      setStatus(`Imported "${pendingP12.filename}". Sign with this cert below.`)
+      const info = validateP12(p12, p12Passphrase)
+      setCert({ p12, passphrase: p12Passphrase, source: 'imported', info })
+      setStatus(
+        `Imported "${pendingP12.filename}" (${info.subject}). ` +
+        `${info.signingCapable ? 'Signing-capable.' : 'Certificate does not advertise digital-signature key usage.'}`,
+      )
       setPendingP12(null)
       setP12Passphrase('')
     } catch (e) {
@@ -199,64 +206,86 @@ export default function SignDialog({ tabId, onClose }: Props) {
     setStatus(`Added "${c.subject || c.label}" to the user trust store.`)
   }
 
-  const hwSign = async () => {
-    if (hwSlotId == null || !hwPin || !hwCertIdHex) {
-      setStatus('Pick a slot, enter PIN, and select a certificate first.')
-      return
-    }
-    const certObj = hwCerts?.find(c => c.idHex === hwCertIdHex)
-    if (!certObj) { setStatus('Selected cert not found in the enumeration.'); return }
-    setHwLoading('signing')
-    setStatus('Signing via PKCS#11 token…')
-    try {
-      const out = await signPdfWithPkcs11(state!.pdfBytes, {
-        modulePath: hwModulePath,
-        slotId: hwSlotId,
-        pin: hwPin,
-        keyIdHex: hwCertIdHex,
-        certDerB64: certObj.certDerB64,
-        // Appearance toggles map to which params we actually pass —
-        // off → empty string so the visible stamp omits the line,
-        // even though the signed dict still carries the field elsewhere.
-        reason: showReason ? reason : '',
-        location: showLocation ? location : '',
-        signerName: showSignerName ? (cn || certObj.subject) : '',
-        contactInfo: showContact ? contactInfo : undefined,
-        certifyLevel: certifyLevel === 'none' ? undefined : Number(certifyLevel) as 1 | 2 | 3,
-      })
-      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: out }))
-      useTabStore.getState().setTabDirty(tabId, true)
-      setStatus(`Signed via hardware token (${certObj.subject || certObj.label}).`)
-      setTab('verify')
-      await loadVerify()
-    } catch (e) {
-      setStatus(e instanceof Error ? `Hardware sign failed: ${e.message}` : 'Hardware sign failed')
-    } finally {
-      setHwLoading(false)
-    }
+  const signKind = certifyLevel !== 'none' ? 'certify' as const : 'sign' as const
+  const signFlavor = certifyLevel !== 'none' ? `certified (L${certifyLevel})` : 'signed'
+
+  const appearanceFor = (signerName: string): SignOptions['appearance'] => {
+    const textLines = composeAppearanceLines({
+      showSignerName,
+      showDate,
+      showReason,
+      showLocation,
+      showContact,
+      cn: signerName,
+      reason,
+      location,
+      contactInfo,
+    })
+    return textLines.length > 0
+      ? {
+          pageIndex: currentPage,
+          textLines,
+          color: '#1e1e2e',
+          fontSize: 10,
+          lineHeight: 12,
+        }
+      : undefined
   }
 
-  const sign = async () => {
-    if (!cert) { setStatus('Generate a cert first.'); return }
+  const baseSignOptions = (signerName: string): SignOptions => ({
+    reason: reason || undefined,
+    location: location || undefined,
+    signerName: signerName || undefined,
+    contactInfo: contactInfo || undefined,
+    certifyLevel: certifyLevel === 'none' ? undefined : Number(certifyLevel) as 1 | 2 | 3,
+    appearance: appearanceFor(signerName),
+  })
+
+  const suggestedCopyName = (suffix: string) => {
+    const tab = useTabStore.getState().tabs.find((t) => t.id === tabId)
+    const base = (tab?.fileName || 'signed-document.pdf').replace(/\.pdf$/i, '')
+    return `${base}-${suffix}.pdf`
+  }
+
+  const saveDraftFirst = async () => {
+    setStatus('Saving draft before creating protected copy...')
+    const actions = await import('../../lib/actions')
+    await actions.saveActiveTab()
+  }
+
+  const openSignedCopy = async (path?: string) => {
+    if (!path) return
+    const actions = await import('../../lib/actions')
+    await actions.openFromPath(path)
+    onClose()
+  }
+
+  const runP12Finalize = async (saveDraft: boolean) => {
+    if (!cert) { setStatus('Generate or import a cert first.'); return }
     setRunning(true)
-    const flavor = certifyLevel !== 'none' ? `certified (L${certifyLevel})` : 'signed'
+    setPendingFinalize(null)
     const withTsa = tsaUrl ? ' + TSA' : ''
-    setStatus(`${flavor.charAt(0).toUpperCase()}${flavor.slice(1)}${withTsa}…`)
+    setStatus(`Creating ${signFlavor}${withTsa} copy...`)
     try {
-      const bytes = await signPdf(state.pdfBytes, cert.p12, cert.passphrase, {
-        reason: showReason ? reason : '',
-        location: showLocation ? location : '',
-        signerName: showSignerName ? cn : '',
-        contactInfo: showContact ? contactInfo : undefined,
-        certifyLevel: certifyLevel === 'none' ? undefined : Number(certifyLevel) as 1 | 2 | 3,
-        tsaUrl: tsaUrl || undefined,
-        ltv: ltv || undefined,
+      if (saveDraft) await saveDraftFirst()
+      const signerName = cn || cert.info?.subject || 'Open Satchel signer'
+      const result = await finalizeSecurityCopy(tabId, {
+        kind: signKind,
+        p12: cert.p12,
+        passphrase: cert.passphrase,
+        signOptions: {
+          ...baseSignOptions(signerName),
+          tsaUrl: tsaUrl || undefined,
+          ltv: ltv || undefined,
+        },
+        suggestedName: suggestedCopyName(signKind === 'certify' ? 'certified' : 'signed'),
       })
-      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: bytes }))
-      useTabStore.getState().setTabDirty(tabId, true)
-      setStatus(`${flavor.charAt(0).toUpperCase()}${flavor.slice(1)}${withTsa} by "${cn}".`)
-      setTab('verify')
-      await loadVerify()
+      setStatus(
+        result.path
+          ? `Created ${signFlavor}${withTsa} copy. Original tab is unchanged.`
+          : `Created ${signFlavor}${withTsa} bytes, but Save As was canceled. Original tab is unchanged.`,
+      )
+      await openSignedCopy(result.path)
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed'
       const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
@@ -269,6 +298,57 @@ export default function SignDialog({ tabId, onClose }: Props) {
     } finally {
       setRunning(false)
     }
+  }
+
+  const runHwFinalize = async (saveDraft: boolean) => {
+    if (hwSlotId == null || !hwPin || !hwCertIdHex) {
+      setStatus('Pick a slot, enter PIN, and select a certificate first.')
+      return
+    }
+    const certObj = hwCerts?.find(c => c.idHex === hwCertIdHex)
+    if (!certObj) { setStatus('Selected cert not found in the enumeration.'); return }
+    setHwLoading('signing')
+    setPendingFinalize(null)
+    setStatus('Creating signed copy via PKCS#11 token...')
+    try {
+      if (saveDraft) await saveDraftFirst()
+      const signerName = cn || certObj.subject || certObj.label
+      const result = await finalizeSecurityCopy(tabId, {
+        kind: 'pkcs11-sign',
+        pkcs11Options: {
+          modulePath: hwModulePath,
+          slotId: hwSlotId,
+          pin: hwPin,
+          keyIdHex: hwCertIdHex,
+          certDerB64: certObj.certDerB64,
+          ...baseSignOptions(signerName),
+        },
+        suggestedName: suggestedCopyName(signKind === 'certify' ? 'certified-hw' : 'signed-hw'),
+      })
+      setStatus(
+        result.path
+          ? `Created signed hardware-token copy. Original tab is unchanged.`
+          : `Created signed bytes, but Save As was canceled. Original tab is unchanged.`,
+      )
+      await openSignedCopy(result.path)
+    } catch (e) {
+      setStatus(e instanceof Error ? `Hardware sign failed: ${e.message}` : 'Hardware sign failed')
+    } finally {
+      setHwLoading(false)
+    }
+  }
+
+  const requestSign = () => {
+    if (!cert) { setStatus('Generate a cert first.'); return }
+    setPendingFinalize('p12')
+  }
+
+  const requestHwSign = () => {
+    if (hwSlotId == null || !hwPin || !hwCertIdHex) {
+      setStatus('Pick a slot, enter PIN, and select a certificate first.')
+      return
+    }
+    setPendingFinalize('hw')
   }
 
   return (
@@ -314,7 +394,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
           {tab === 'sign' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <p style={{ margin: 0, fontSize: 11, color: 'var(--text-secondary)' }}>
-                Generate a self-signed certificate + sign this document. Adobe Reader will show the signature as valid-but-untrusted (no CA chain). Use Certify to add /DocMDP permission lock.
+                Create a signed copy of the current document. Finish visual signatures, form fills, redactions, and edits first; the original tab stays editable, and later edits to the signed copy can invalidate its cryptographic signature. Adobe Reader will show self-signed certs as valid-but-untrusted.
               </p>
               <Field label="Common Name (signer)">
                 <input data-testid="sign-cn" style={inp} value={cn} onChange={(e) => setCn(e.target.value)} />
@@ -467,7 +547,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
                   style={btnSecondary}>
                   Import .p12 / .pfx
                 </button>
-                <button data-testid="sign-sign" onClick={sign} disabled={!cert || running}
+                <button data-testid="sign-sign" onClick={requestSign} disabled={!cert || running}
                   style={{ ...btnPrimary, opacity: (!cert || running) ? 0.5 : 1 }}>
                   {running ? 'Signing…'
                     : certifyLevel !== 'none' ? `Certify & sign (L${certifyLevel})`
@@ -477,9 +557,20 @@ export default function SignDialog({ tabId, onClose }: Props) {
                     : 'Sign'}
                 </button>
               </div>
+              {pendingFinalize === 'p12' && (
+                <SecurityFinalizePrompt
+                  createLabel="Create Signed Copy"
+                  onCancel={() => setPendingFinalize(null)}
+                  onSaveDraft={() => void runP12Finalize(true)}
+                  onCreate={() => void runP12Finalize(false)}
+                  busy={running}
+                />
+              )}
               {cert && (
                 <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
                   Active cert: {cert.source === 'imported' ? 'imported .p12' : 'self-signed (generated)'}
+                  {cert.info ? ` · ${cert.info.subject} · expires ${cert.info.expiresAt.slice(0, 10)}` : ''}
+                  {cert.info && !cert.info.signingCapable ? ' · key usage warning' : ''}
                 </div>
               )}
             </div>
@@ -580,7 +671,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
 
               {hwCerts && hwCerts.length > 0 && (
                 <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                  <button data-testid="hw-sign" onClick={hwSign}
+                  <button data-testid="hw-sign" onClick={requestHwSign}
                     disabled={!hwCertIdHex || !!hwLoading}
                     style={{ ...btnPrimary, opacity: (!hwCertIdHex || !!hwLoading) ? 0.5 : 1 }}>
                     {hwLoading === 'signing' ? 'Signing…'
@@ -594,10 +685,19 @@ export default function SignDialog({ tabId, onClose }: Props) {
                   </button>
                 </div>
               )}
+              {pendingFinalize === 'hw' && (
+                <SecurityFinalizePrompt
+                  createLabel="Create Signed Copy"
+                  onCancel={() => setPendingFinalize(null)}
+                  onSaveDraft={() => void runHwFinalize(true)}
+                  onCreate={() => void runHwFinalize(false)}
+                  busy={hwLoading === 'signing'}
+                />
+              )}
 
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
-                Reason / Location / Certify level / Signer name are picked up
-                from the Sign tab. Switch tabs to edit them.
+                Reason / Location / Certify level / Signer name and visible appearance are picked up
+                from the Sign tab. Switch tabs to edit them before creating the signed copy.
               </div>
             </div>
           )}
@@ -708,6 +808,46 @@ function TabBtn({ active, onClick, children, testId }: {
       borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent',
       border: 'none', borderRadius: 0, cursor: 'pointer',
     }}>{children}</button>
+  )
+}
+
+function SecurityFinalizePrompt({
+  createLabel,
+  onCancel,
+  onSaveDraft,
+  onCreate,
+  busy,
+}: {
+  createLabel: string
+  onCancel: () => void
+  onSaveDraft: () => void
+  onCreate: () => void
+  busy: boolean
+}) {
+  return (
+    <div data-testid="security-finalize-prompt" style={{
+      marginTop: 8,
+      padding: 10,
+      border: '1px solid var(--warn)',
+      borderRadius: 4,
+      background: 'rgba(230, 180, 0, 0.10)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      <div style={{ fontSize: 11, color: 'var(--text-primary)', fontWeight: 600 }}>
+        Create a protected copy?
+      </div>
+      <div style={{ fontSize: 10.5, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+        Finish edits before signing. Open Satchel will bake the current document into a new signed copy;
+        the original tab stays editable, and editing the signed copy later can invalidate its signature.
+      </div>
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+        <button type="button" onClick={onCancel} disabled={busy} style={btnSecondary}>Cancel</button>
+        <button type="button" onClick={onSaveDraft} disabled={busy} style={btnSecondary}>Save Draft First</button>
+        <button type="button" onClick={onCreate} disabled={busy} style={btnPrimary}>{createLabel}</button>
+      </div>
+    </div>
   )
 }
 

@@ -6,6 +6,7 @@ import { appApi } from '../../lib/ipc'
 import { FORMAT_NAMES } from '../../types/tabs'
 import { I } from '../icons'
 import type { PdfFormatState } from '../../formats/pdf'
+import { countManualRedactions } from '../../services/pdfManualRedactions'
 
 /** Status bar — monospace metadata band sitting along the bottom edge.
  *
@@ -25,6 +26,7 @@ export default function StatusBar() {
   const currentPage = useUIStore((s) => s.currentPage)
   const autoSaveStatus = useUIStore((s) => s.autoSaveStatus)
   const autoSaveEnabled = useUIStore((s) => s.autoSaveEnabled)
+  const legalGuarantee = useUIStore((s) => s.legalGuaranteeRedaction)
 
   // Pull page count from the active format state — only PDF handler
   // populates this today, but the lookup is generic so other handlers
@@ -33,6 +35,10 @@ export default function StatusBar() {
     if (!active || active.format !== 'pdf') return 0
     const fmt = s.data[active.id] as PdfFormatState | undefined
     return fmt?.pageCount ?? 0
+  })
+  const pendingRedactionCount = useFormatStore((s) => {
+    if (!active || active.format !== 'pdf') return 0
+    return countManualRedactions(s.data[active.id] as PdfFormatState | undefined)
   })
 
   const [version, setVersion] = useState<string | null>(null)
@@ -73,6 +79,20 @@ export default function StatusBar() {
       {pageCount > 0 && (
         <span>
           pg {String(currentPage + 1).padStart(2, '0')} / {pageCount}
+        </span>
+      )}
+      {pendingRedactionCount > 0 && (
+        <span style={{ color: 'var(--warn)' }}>
+          {pendingRedactionCount} redaction mark{pendingRedactionCount === 1 ? '' : 's'} · autosave off
+        </span>
+      )}
+      {legalGuarantee && (
+        <span
+          data-testid="statusbar-legal-guarantee"
+          title="Legal Guarantee redaction is ON — redacted pages flatten to secured images on save; autosave is locked off."
+          style={{ color: 'var(--accent)', fontWeight: 600 }}
+        >
+          🔒 Legal Guarantee · autosave locked off
         </span>
       )}
 

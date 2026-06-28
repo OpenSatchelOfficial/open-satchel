@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { PdfFormatState } from './index'
 import { useFormatStore } from '../../stores/formatStore'
 import { pdfToImages } from '../../services/pdfOps'
+import { resolveOutputBytes } from '../../services/pdfPrint'
 
 interface Props {
   tabId: string
@@ -28,14 +29,20 @@ export default function SnipPinDialog({ tabId, onClose }: Props) {
   useEffect(() => {
     if (!state) return
     (async () => {
-      const imgs = await pdfToImages(state.pdfBytes, { scale: 1.3 })
-      const target = imgs[pageIdx] ?? imgs[0]
-      if (!target) return
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const blob = new Blob([target as any], { type: 'image/png' })
-      setPngUrl(URL.createObjectURL(blob))
+      try {
+        // GATE 3: render the redaction-baked bytes so a snip can never capture
+        // the un-redacted secret pixels (pending marks aren't in state.pdfBytes).
+        const imgs = await pdfToImages(await resolveOutputBytes(tabId), { scale: 1.3 })
+        const target = imgs[pageIdx] ?? imgs[0]
+        if (!target) return
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const blob = new Blob([target as any], { type: 'image/png' })
+        setPngUrl(URL.createObjectURL(blob))
+      } catch {
+        setPngUrl(null)
+      }
     })()
-  }, [state, pageIdx])
+  }, [state, pageIdx, tabId])
 
   useEffect(() => () => { if (pngUrl) URL.revokeObjectURL(pngUrl); if (snipUrl) URL.revokeObjectURL(snipUrl) }, [pngUrl, snipUrl])
 

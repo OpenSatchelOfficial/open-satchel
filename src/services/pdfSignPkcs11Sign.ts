@@ -22,6 +22,7 @@
 import forge from 'node-forge'
 import { getZga } from './zgaLoader'
 import { signSha256WithPkcs11 } from './pdfSignPkcs11'
+import { buildSignatureAppearanceDrawInfo, type SignatureAppearanceOptions } from './pdfSign'
 
 export interface SignPdfWithPkcs11Options {
   /** PKCS#11 module path (e.g. C:\Program Files\SoftHSM2\lib\softhsm2-x64.dll). */
@@ -38,6 +39,7 @@ export interface SignPdfWithPkcs11Options {
   reason?: string
   location?: string
   signerName?: string
+  appearance?: SignatureAppearanceOptions
   /** Contact info field (email / phone). Surfaced via the visible-
    *  signature appearance editor; goes into zga's `contact` slot
    *  which writes it to the /M dict + the appearance stream. */
@@ -85,8 +87,8 @@ export async function signPdfWithPkcs11(
   // bytes); we bump to 16384 (8192 bytes) which covers a cert chain
   // of up to ~20 certs before overflowing.
   const cryptoOpts: Record<string, unknown> = {
-    drawinf: opts.signerName
-      ? { signame: opts.signerName, reason: opts.reason, location: opts.location, contact: opts.contactInfo }
+    drawinf: opts.appearance
+      ? await buildSignatureAppearanceDrawInfo(pdfBytes, opts.appearance)
       : undefined,
     reason: opts.reason,
     location: opts.location,

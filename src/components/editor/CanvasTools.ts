@@ -32,6 +32,7 @@ export function applyHighlightAreaTool(canvas: Canvas, color: string, onSave: ()
   let startX = 0, startY = 0, shape: Rect | null = null
   canvas.on('mouse:down', (e: TPointerEventInfo) => {
     if (e.target) return
+    ;(canvas as any).__dragCreateActive = true
     const p = canvas.getScenePoint(e.e)
     startX = p.x; startY = p.y
     shape = new Rect({ left: startX, top: startY, width: 0, height: 0, fill: color, opacity: 0.35, stroke: color, strokeWidth: 0.5, selectable: true })
@@ -49,6 +50,7 @@ export function applyHighlightAreaTool(canvas: Canvas, color: string, onSave: ()
     canvas.renderAll()
   })
   canvas.on('mouse:up', () => {
+    ;(canvas as any).__dragCreateActive = false
     if (shape && (shape.width ?? 0) > 3) onSave()
     shape = null
   })

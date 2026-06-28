@@ -30,7 +30,7 @@
 //   - fsType respect (TrueType OS/2 embedding flags) so we don't
 //     re-embed fonts the vendor marked no-embedding.
 //
-// In browser mode, window.api.font.listSystem
+// In browser mode (npm run dev + zenlink), window.api.font.listSystem
 // returns [] per the shim — resolveSystemFont always returns null and
 // callers fall back cleanly. Tauri mode is where this has effect.
 
@@ -46,6 +46,13 @@ export interface ResolvedFont {
   family: string
   style: string
   bytes: Uint8Array
+  /** How the family name matched (Session 4): 'exact' = normalized
+   *  equality; 'fuzzy' = bidirectional substring containment
+   *  ("HelveticaNeue" vs "Helvetica Neue", "ArialMT" vs "Arial").
+   *  Fuzzy is load-bearing for PS-suffixed names but can borrow a
+   *  WRONG family silently — callers on the engine path record
+   *  font.system_match_fuzzy (info) so it is never invisible. */
+  matchKind: 'exact' | 'fuzzy'
 }
 
 let systemListCache: Promise<FontEntry[]> | null = null
@@ -104,14 +111,18 @@ function styleScore(entryStyle: string, wantBold: boolean, wantItalic: boolean):
 }
 
 /** Extract the first family name from a font-family CSS-style string.
- *  pdfjs fontFamily looks like `'Helvetica', -apple-system, ...`. */
-function primaryFamily(family: string): string {
+ *  pdfjs fontFamily looks like `'Helvetica', -apple-system, ...`.
+ *  Exported (Session 2): degradation records must name the PRIMARY
+ *  family the document asked for — the full stack always carries a
+ *  Standard-14 tail (normalizeFontFamily), which both defeats the
+ *  alias/severity classifier and reads as noise in the toast. */
+export function primaryFamily(family: string): string {
   if (!family) return ''
   const first = family.split(',')[0]?.trim() ?? ''
   return first.replace(/^['"]/, '').replace(/['"]$/, '')
 }
 
-async function loadBytes(f: FontEntry): Promise<ResolvedFont | null> {
+async function loadBytes(f: FontEntry, matchKind: 'exact' | 'fuzzy'): Promise<ResolvedFont | null> {
   let bytes = bytesCache.get(f.id)
   if (!bytes) {
     try {
@@ -122,7 +133,7 @@ async function loadBytes(f: FontEntry): Promise<ResolvedFont | null> {
     if (!bytes || bytes.byteLength === 0) return null
     bytesCache.set(f.id, bytes)
   }
-  return { id: f.id, family: f.family, style: f.style, bytes }
+  return { id: f.id, family: f.family, style: f.style, bytes, matchKind }
 }
 
 /**
@@ -147,8 +158,10 @@ export async function resolveSystemFont(
   // Exact family match first, then fuzzy substring in either direction
   // (covers "HelveticaNeue" vs "Helvetica Neue", "TimesNewRoman" vs
   // "Times New Roman", etc.).
+  let matchKind: 'exact' | 'fuzzy' = 'exact'
   let matches: FontEntry[] = fonts.filter((f) => norm(f.family) === target)
   if (matches.length === 0) {
+    matchKind = 'fuzzy'
     matches = fonts.filter((f) => {
       const fn = norm(f.family)
       return fn.includes(target) || target.includes(fn)
@@ -168,5 +181,5 @@ export async function resolveSystemFont(
   }
   if (!best) return null
 
-  return loadBytes(best)
+  return loadBytes(best, matchKind)
 }

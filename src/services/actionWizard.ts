@@ -7,7 +7,7 @@ import { pdfToText, toImageOnlyPdf } from './pdfConvert'
 import { flattenTransparency } from './pdfFlatten'
 import { runOcr, buildSearchablePdf, type OcrOptions } from './pdfOcr'
 import { convertPdfHighFidelity } from './pdfToOffice'
-import { signPdf } from './pdfSign'
+import { signPdf, type SignOptions } from './pdfSign'
 
 export type ActionStepType =
   | 'compress'
@@ -38,6 +38,7 @@ export interface SignStepOptions {
   location?: string
   signerName?: string
   contactInfo?: string
+  appearance?: SignOptions['appearance']
   /** /DocMDP level (1 / 2 / 3). Omit for ordinary approval. */
   certifyLevel?: 1 | 2 | 3
   /** RFC 3161 TSA URL. Omit to skip. */
@@ -187,6 +188,7 @@ export async function executeWorkflow(
             contactInfo: o.contactInfo,
             certifyLevel: o.certifyLevel,
             tsaUrl: o.tsaUrl,
+            appearance: o.appearance,
           })
           log.push(`  Signed${o.tsaUrl ? ' + TSA' : ''}${o.certifyLevel ? ` (certify L${o.certifyLevel})` : ''}`)
           break
@@ -255,10 +257,13 @@ export const PRESET_WORKFLOWS: ActionWorkflow[] = [
       { type: 'compress', label: 'Optimize' },
     ]
   },
+  // Gate-2 P3: copy must not imply a redaction-grade guarantee — this
+  // preset strips DOCUMENT-level hidden data; it does NOT remove visible
+  // page content. Redaction is its own verified tool.
   {
-    name: 'Publish Sensitive Info (sanitize + flatten + Bates)',
+    name: 'Prep for Publication (sanitize + flatten + Bates — does NOT redact)',
     steps: [
-      { type: 'sanitize', label: 'Strip metadata, JS, external refs' },
+      { type: 'sanitize', label: 'Strip metadata, JS, external refs (page content is NOT redacted)' },
       { type: 'flatten_transparency', label: 'Flatten transparency' },
       { type: 'bates', label: 'Apply Bates numbering', options: { prefix: 'PUB-', digits: 5 } },
       { type: 'compress', label: 'Optimize' },

@@ -6,13 +6,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { comparePdfs, type ComparePdfsResult } from '../../services/pdfCompare'
 import { pdfToImages } from '../../services/pdfOps'
+import { resolveOutputBytes } from '../../services/pdfPrint'
 
 interface Props {
-  leftBytes: Uint8Array
+  tabId: string
   onClose: () => void
 }
 
-export default function VisualCompareDialog({ leftBytes, onClose }: Props) {
+export default function VisualCompareDialog({ tabId, onClose }: Props) {
   const [rightBytes, setRightBytes] = useState<Uint8Array | null>(null)
   const [leftPngs, setLeftPngs] = useState<Uint8Array[]>([])
   const [rightPngs, setRightPngs] = useState<Uint8Array[]>([])
@@ -33,6 +34,9 @@ export default function VisualCompareDialog({ leftBytes, onClose }: Props) {
   useEffect(() => {
     if (!rightBytes) return
     (async () => {
+      // GATE 3: the left (current) doc's pending redactions must not leak into
+      // the rendered pages OR the text diff — bake them in first.
+      const leftBytes = await resolveOutputBytes(tabId)
       const [lp, rp, d] = await Promise.all([
         pdfToImages(leftBytes, { scale: 1.2 }),
         pdfToImages(rightBytes, { scale: 1.2 }),
@@ -40,7 +44,7 @@ export default function VisualCompareDialog({ leftBytes, onClose }: Props) {
       ])
       setLeftPngs(lp); setRightPngs(rp); setDiff(d)
     })()
-  }, [leftBytes, rightBytes])
+  }, [tabId, rightBytes])
 
   const leftUrl = useMemo(() => leftPngs[activePage] ? URL.createObjectURL(new Blob([leftPngs[activePage] as unknown as BlobPart], { type: 'image/png' })) : null, [leftPngs, activePage])
   const rightUrl = useMemo(() => rightPngs[activePage] ? URL.createObjectURL(new Blob([rightPngs[activePage] as unknown as BlobPart], { type: 'image/png' })) : null, [rightPngs, activePage])

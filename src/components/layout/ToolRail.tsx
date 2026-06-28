@@ -26,6 +26,7 @@ const TOOLS: RailToolDef[] = [
   { id: 'shape_rect', icon: <I.Shape />,     label: 'Shape',      kbd: 'U' },
   { id: 'stamp',     icon: <I.Stamp />,      label: 'Stamp',      kbd: 'S' },
   { id: 'signature', icon: <I.Sign />,       label: 'Fill & Sign', kbd: 'F' },
+  { id: 'mark_redaction', icon: <I.Redact />, label: 'Mark redaction' },
   { id: 'redact',    icon: <I.Redact />,     label: 'Redact' },
   { id: 'image',     icon: <I.Insert />,     label: 'Image' },
 ]

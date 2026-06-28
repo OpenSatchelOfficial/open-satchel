@@ -1,5 +1,15 @@
 // A10 — Certificate-based encryption (PDF /Filter /Adobe.PubSec).
 //
+// ⚠️ STALE-HEADER NOTE (corrected 2026-06-14, gauntlet-installed): the prose
+// BELOW describes the ORIGINAL zga-based pipeline and is retained only as
+// history. The PRODUCTION path is NATIVE Rust and does NOT touch zgapdfsigner
+// — see the `encryptPdfToCerts` doc-comment further down ("NATIVE since
+// 2026-06-11": the whole pipeline runs in the Rust `pdf_encrypt_to_certs`
+// command; satchel-core RustCrypto does CMS/AES). Consequently the
+// installed-build encryption packaging bug (vendored zga bundle missing from
+// dist/) affected only the PASSWORD path (`pdfCrypto.ts` encryptPdf) + signing,
+// NOT this cert-encrypt path. (The forge helpers below are a test-side oracle.)
+//
 // Encrypts the document body with AES-256 (delegated to zgapdfsigner)
 // using a randomly-generated File Encryption Key, then wraps that
 // FEK in CMS EnvelopedData per recipient certificate so only the
@@ -55,9 +65,13 @@ const DEFAULT_PERMISSIONS = -4 // bits 3..32 set, bits 1-2 reserved 0
  *
  * Returns the DER-encoded CMS EnvelopedData blob as Uint8Array.
  *
- * Public/exported because the tests verify the round-trip
- * (encrypt with cert pubkey → decrypt with cert privkey → same
- * payload bytes).
+ * LEGACY / TEST ORACLE ONLY (2026-06-11): production envelope
+ * building moved to the native RustCrypto implementation
+ * (satchel-core, via the pdf_encrypt_to_certs and
+ * cms_wrap_recipient commands). This forge implementation stays
+ * exported solely so interop tests can prove forge↔native
+ * envelopes stay mutually decryptable. Do not call from production
+ * code paths.
  */
 export function wrapPayloadForRecipient(
   payload: Uint8Array,
@@ -181,21 +195,20 @@ export function buildPubKeyEncryptDictData(
 /**
  * Encrypt a PDF end-to-end for a set of recipient certificates.
  *
- * Pipeline:
- *  1. Generate a 20-byte random seed.
- *  2. FEK = SHA-256(seed) per Adobe V=5 spec.
- *  3. For each recipient cert: build a CMS EnvelopedData blob
- *     wrapping the 24-byte payload (seed || /P little-endian).
- *  4. Hand off the cleartext PDF + envelopes + FEK + permissions
- *     to the Rust `pdf_encrypt_to_certs` command, which walks
- *     every indirect object, AES-256-CBC encrypts strings + stream
- *     content (random per-object IV), and installs the V=5
- *     /Encrypt dict with /Filter /Adobe.PubSec /SubFilter
- *     /adbe.pkcs7.s5 and /Recipients on /CF/DefaultCryptFilter.
+ * NATIVE since 2026-06-11: the entire pipeline — seed generation,
+ * CMS EnvelopedData per recipient (RustCrypto in satchel-core,
+ * where node-forge used to do it here), FEK derivation, object
+ * walking, AES-256-CBC body encryption, V=5 /Encrypt dict — runs
+ * in the Rust `pdf_encrypt_to_certs` command. Secret material
+ * (seed, FEK) never crosses the IPC boundary; this function ships
+ * cleartext bytes + certificate PEMs and gets ciphertext back.
  *
- * Returns the encrypted PDF bytes — ready to save to disk.
- * Adobe Reader (and any V=5-aware viewer) recognises the dict
- * and decrypts via the matching cert's private key.
+ * Adobe Reader (and any V=5-aware viewer) recognises the dict and
+ * decrypts via the matching cert's private key.
+ *
+ * The forge-based envelope helpers below remain ONLY as the
+ * test-side compatibility oracle (forge must keep decrypting native
+ * envelopes; see scripts/storm/test-cms-parity.mjs).
  */
 export async function encryptPdfToCerts(
   bytes: Uint8Array,
@@ -205,20 +218,12 @@ export async function encryptPdfToCerts(
     throw new Error('encryptPdfToCerts: at least one recipient cert required')
   }
   const permissions = opts.permissions ?? DEFAULT_PERMISSIONS
-  const seedBin = forge.random.getBytesSync(20)
-  const seed = binaryToUint8(seedBin)
-  const payload = buildRecipientPayload(seed, permissions)
-  const envelopes = opts.recipientCertsPem.map((pem) =>
-    wrapPayloadForRecipient(payload, pem),
-  )
-  const fek = deriveFekFromSeeds([seed])
   // Rust IPC. Tauri v2 marshals Vec<u8> as number[] across the
   // boundary efficiently — multi-MB PDFs transit in single-digit ms.
   const { invoke } = await import('@tauri-apps/api/core')
   const out = await invoke<number[] | Uint8Array>('pdf_encrypt_to_certs', {
     bytes: Array.from(bytes),
-    recipientEnvelopes: envelopes.map((e) => Array.from(e)),
-    fek: Array.from(fek),
+    recipientCertsPem: opts.recipientCertsPem,
     permissions,
   })
   return out instanceof Uint8Array ? out : new Uint8Array(out)

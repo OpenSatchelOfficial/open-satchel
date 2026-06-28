@@ -253,6 +253,56 @@
   padding: 3px 3px 2px;
 }
 
+.rgrp[data-group-label='Stamps'] {
+  width: 612px;
+  max-width: 612px;
+}
+
+.rgrp[data-group-label='Stamps'] .rgrp-row {
+  align-content: center;
+  row-gap: 3px;
+}
+
+.stamp-template-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stamp-template-input {
+  width: 190px;
+  height: calc(var(--rb-h) - 4px);
+  min-height: calc(var(--rb-h) - 4px);
+  resize: none;
+  overflow: hidden;
+  white-space: pre;
+}
+
+.stamp-token-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.stamp-token-btn {
+  appearance: none;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg-surface);
+  color: var(--ink-2);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.stamp-token-btn:hover {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  background: var(--bg-hover);
+}
+
 /* ───── Inline form controls inside the ribbon ───── */
 
 .rb-body select:not(.rpicker) {

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useFormatStore } from '../../stores/formatStore'
 import type { PdfFormatState } from './index'
 import { splitPdf, splitEveryN, type SplitRange } from '../../services/pdfOps'
+import { resolveOutputBytes } from '../../services/pdfPrint'
 
 interface Props {
   tabId: string
@@ -44,15 +45,18 @@ export default function SplitDialog({ tabId, onClose }: Props) {
     setRunning(true)
     setStatus('Splitting…')
     try {
+      // GATE 3: bake pending manual redactions before exporting split chunks —
+      // each chunk is a downloaded file that must not carry the secret.
+      const srcBytes = await resolveOutputBytes(tabId)
       let chunks: Uint8Array[] = []
       if (mode === 'every-n') {
-        chunks = await splitEveryN(state.pdfBytes, Math.max(1, n))
+        chunks = await splitEveryN(srcBytes, Math.max(1, n))
       } else if (mode === 'ranges') {
         const ranges = parseRanges(rangesText)
         if (ranges.length === 0) { setStatus('Invalid ranges. Use "1-5, 6-10".'); setRunning(false); return }
-        chunks = await splitPdf(state.pdfBytes, ranges)
+        chunks = await splitPdf(srcBytes, ranges)
       } else {
-        chunks = await splitEveryN(state.pdfBytes, 1)
+        chunks = await splitEveryN(srcBytes, 1)
       }
 
       const baseName = 'split'

@@ -5,9 +5,9 @@
 // This is the engine half of "Acrobat parity A4: find SSNs, emails,
 // phones, credit cards in a flat PDF and stage redactions over each
 // match." Once the rects are returned the caller hands them to
-// `applyRedactions` (services/pdfRedact.ts), which rasterizes the
-// affected pages and burns opaque rects — same trust posture as
-// hand-drawn redactions.
+// `applyRedactions` (services/pdfRedact.ts), which removes recoverable
+// text and falls back to raster replacement for image-like page regions
+// — same trust posture as hand-drawn redactions.
 //
 // Why pdfjs text-content rather than raw content streams: pdfjs gives
 // us per-item bboxes (`item.transform[4..5]` + `item.width`) in PDF
@@ -17,7 +17,7 @@
 // stream walker would otherwise have to re-decode bytes.
 //
 // The engine returns strict matches (string + bbox + page); pattern
-// composition is the caller's responsibility.
+// composition is the caller's responsibility (test-hooks UI / dialog).
 
 import type { RedactionRect } from './pdfRedact'
 

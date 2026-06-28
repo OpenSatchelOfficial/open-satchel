@@ -11,6 +11,7 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
   const fabricRef = useRef<FabricCanvas | null>(null)
   const [mode, setMode] = useState<'draw' | 'type'>('draw')
   const [typedText, setTypedText] = useState('')
+  const transparentBackground = 'rgba(255,255,255,0)'
 
   // Fabric owns the <canvas>. Keep the <canvas> element mounted for the
   // whole dialog lifetime (hide via CSS when in Type mode) so we can use
@@ -22,7 +23,7 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
     const fc = new FabricCanvas(el, {
       width: 400,
       height: 150,
-      backgroundColor: '#ffffff',
+      backgroundColor: transparentBackground,
       isDrawingMode: true
     })
     const brush = new PencilBrush(fc)
@@ -48,7 +49,7 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
     const fc = fabricRef.current
     if (!fc) return
     fc.clear()
-    fc.backgroundColor = '#ffffff'
+    fc.backgroundColor = transparentBackground
     fc.renderAll()
   }
 
@@ -68,8 +69,6 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
     tempCanvas.height = 150
     const ctx = tempCanvas.getContext('2d')
     if (!ctx) return
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect(0, 0, 400, 150)
     ctx.fillStyle = '#000033'
     ctx.font = 'italic 36px "Dancing Script", cursive, "Segoe Script", "Comic Sans MS"'
     ctx.textBaseline = 'middle'
@@ -95,7 +94,7 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
         minWidth: 450
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3 style={{ margin: 0, fontSize: 16 }}>Create Signature</h3>
+          <h3 style={{ margin: 0, fontSize: 16 }}>Create Visual Signature</h3>
           <button onClick={onClose} style={{ fontSize: 18 }}>✕</button>
         </div>
 
@@ -126,10 +125,12 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
 
         {/* Keep the draw pad mounted for the dialog's lifetime; hide it in Type mode. */}
         <div style={{ display: mode === 'draw' ? 'block' : 'none' }}>
-          <canvas
-            ref={canvasRef}
-            style={{ border: '1px solid var(--border)', borderRadius: 4, cursor: 'crosshair' }}
-          />
+          <div style={{ width: 400, height: 150, background: '#fff', border: '1px solid var(--border)', borderRadius: 4, overflow: 'hidden' }}>
+            <canvas
+              ref={canvasRef}
+              style={{ cursor: 'crosshair' }}
+            />
+          </div>
           <button
             onClick={handleClear}
             style={{
@@ -182,7 +183,7 @@ export default function SignatureDialog({ onClose, onConfirm }: Props) {
               cursor: mode === 'type' && !typedText.trim() ? 'not-allowed' : 'pointer'
             }}
           >
-            Use Signature
+            Use Visual Signature
           </button>
         </div>
       </div>

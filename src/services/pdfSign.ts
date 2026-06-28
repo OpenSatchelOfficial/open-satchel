@@ -2,10 +2,13 @@
 // self-signed X.509 cert client-side, then signs the PDF via
 // zgapdfsigner's PdfSigner (MIT, pdf-lib-based, audited 2026-04-18).
 //
-// Signing uses zgapdfsigner because it
+// Signing moved from @signpdf to zgapdfsigner because zgapdfsigner
 // supports (a) RFC 3161 TSA timestamps, (b) /DocMDP certified signatures
 // injected at the correct pre-sign placeholder position, (c) visible
-// signatures, and (d) LTV — all in one library.
+// signatures, and (d) LTV — all in one library. @signpdf's placeholder
+// API didn't expose the /V dict pre-sign hook we needed for
+// certification (adding /Reference after signing invalidates the sig).
+// See PARITY_GAP_REPORT.md for the full research trail.
 //
 // Note: "self-signed" still means viewers like Adobe Reader will show
 // the signature as valid-but-untrusted (no CA chain). True trusted-CA
@@ -25,7 +28,7 @@
 // the Rust proxy IS the code change that makes Tauri work.
 
 import forge from 'node-forge'
-import { PDFDocument, PDFName, PDFDict } from 'pdf-lib'
+import { PDFDocument, PDFName, PDFDict, StandardFonts } from 'pdf-lib'
 import { getZga } from './zgaLoader'
 import { Buffer as BufferPolyfill } from 'buffer'
 import { isTrusted } from './pdfTrustStore'
@@ -46,6 +49,31 @@ export interface GeneratedCert {
   p12: Uint8Array       // PKCS#12 bundle (cert + private key)
   passphrase: string    // used to decrypt the .p12
   certPem: string       // public cert in PEM form (shareable)
+}
+
+export interface SignatureAppearanceRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface SignatureAppearanceOptions {
+  pageIndex?: number
+  rect?: SignatureAppearanceRect
+  textLines: string[]
+  color?: string
+  fontSize?: number
+  lineHeight?: number
+}
+
+export interface P12ValidationInfo {
+  subject: string
+  issuer: string
+  expiresAt: string
+  validFrom: string
+  fingerprint: string
+  signingCapable: boolean
 }
 
 /** Generate a self-signed keypair + PKCS#12 bundle. Pure client-side;
@@ -94,6 +122,7 @@ export interface SignOptions {
   location?: string
   signerName?: string
   contactInfo?: string
+  appearance?: SignatureAppearanceOptions
   /** When set, adds a /DocMDP transform to the signature so the PDF is
    *  "certified". Levels per PDF spec §12.8.2.2:
    *    1 = No changes allowed
@@ -143,6 +172,10 @@ export async function signPdf(
     contact: opts.contactInfo ?? '',
     signame: opts.signerName ?? undefined,
   }
+  const drawinf = opts.appearance
+    ? await buildSignatureAppearanceDrawInfo(bytes, opts.appearance)
+    : undefined
+  if (drawinf) sopt.drawinf = drawinf
   if (opts.certifyLevel) sopt.permission = opts.certifyLevel
   if (opts.tsaUrl) sopt.signdate = { url: opts.tsaUrl, len: 4000 }
   if (opts.ltv) sopt.ltv = 1
@@ -160,8 +193,8 @@ export interface SignatureInfo {
 }
 
 /** List signatures present in a PDF. Fast path via AcroForm; fallback
- *  parses byte-level /Sig dictionaries since signatures can be structured
- *  in ways pdf-lib's form parser misses. */
+ *  parses byte-level /Sig dictionaries since @signpdf-produced
+ *  signatures can be structured in ways pdf-lib's form parser misses. */
 export async function listSignatures(bytes: Uint8Array): Promise<SignatureInfo[]> {
   const sigs: SignatureInfo[] = []
   try {
@@ -223,6 +256,104 @@ export function importP12FromArrayBuffer(buf: ArrayBuffer): Uint8Array {
   return new Uint8Array(buf)
 }
 
+export async function buildSignatureAppearanceDrawInfo(
+  bytes: Uint8Array,
+  appearance: SignatureAppearanceOptions,
+): Promise<Record<string, unknown> | undefined> {
+  const text = appearance.textLines.map((line) => line.trim()).filter(Boolean).join('\n')
+  if (!text) return undefined
+
+  const pageIndex = Math.max(0, appearance.pageIndex ?? 0)
+  const rect = appearance.rect ?? await defaultSignatureRect(bytes, pageIndex)
+  const fontSize = appearance.fontSize ?? 10
+  const lineHeight = appearance.lineHeight ?? 12
+  const padding = 8
+
+  return {
+    pageidx: pageIndex,
+    area: {
+      x: rect.x,
+      y: rect.y,
+      w: rect.width,
+      h: rect.height,
+    },
+    textInfo: {
+      text,
+      fontData: StandardFonts.Helvetica,
+      size: fontSize,
+      lineHeight,
+      color: appearance.color ?? '#1e1e2e',
+      xOffset: padding,
+      yOffset: padding,
+      wMax: Math.max(24, rect.width - padding * 2),
+    },
+  }
+}
+
+export function validateP12(bytes: Uint8Array, passphrase: string): P12ValidationInfo {
+  try {
+    const asn1 = forge.asn1.fromDer(uint8ToBinary(bytes), false)
+    const p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, passphrase)
+    const certBags = p12.getBags({ bagType: forge.pki.oids.certBag })[forge.pki.oids.certBag] ?? []
+    const keyBags = [
+      ...(p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag })[forge.pki.oids.pkcs8ShroudedKeyBag] ?? []),
+      ...(p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag] ?? []),
+    ]
+    const cert = certBags.find((bag) => bag.cert)?.cert
+    if (!cert) throw new Error('No certificate found in PKCS#12 bundle.')
+    if (keyBags.length === 0) throw new Error('No private key found in PKCS#12 bundle.')
+
+    const keyUsage = cert.extensions?.find((ext) => ext.name === 'keyUsage') as
+      | { digitalSignature?: boolean; nonRepudiation?: boolean }
+      | undefined
+    const signingCapable = !keyUsage || !!keyUsage.digitalSignature || !!keyUsage.nonRepudiation
+    const certAsn1 = forge.pki.certificateToAsn1(cert)
+    const certDerBinary = forge.asn1.toDer(certAsn1).getBytes()
+    const md = forge.md.sha256.create()
+    md.update(certDerBinary)
+
+    return {
+      subject: formatCertName(cert.subject.attributes),
+      issuer: formatCertName(cert.issuer.attributes),
+      validFrom: cert.validity.notBefore.toISOString(),
+      expiresAt: cert.validity.notAfter.toISOString(),
+      fingerprint: md.digest().toHex(),
+      signingCapable,
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`PKCS#12 validation failed: ${msg}`)
+  }
+}
+
+async function defaultSignatureRect(
+  bytes: Uint8Array,
+  pageIndex: number,
+): Promise<SignatureAppearanceRect> {
+  const doc = await PDFDocument.load(bytes)
+  const page = doc.getPage(Math.min(pageIndex, doc.getPageCount() - 1))
+  const { width, height } = page.getSize()
+  const rectW = Math.min(240, Math.max(180, width * 0.36))
+  const rectH = 76
+  const margin = 48
+  return {
+    x: Math.max(margin, width - margin - rectW),
+    y: Math.max(margin, Math.min(height - margin - rectH, margin)),
+    width: rectW,
+    height: rectH,
+  }
+}
+
+function uint8ToBinary(bytes: Uint8Array): string {
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  return s
+}
+
+function formatCertName(attrs: Array<{ shortName?: string; name?: string; value?: unknown }>): string {
+  return attrs.map((a) => `${a.shortName ?? a.name}=${a.value}`).join(', ')
+}
+
 // ── Signature verification ─────────────────────────────────────────
 
 export interface VerifyResult {
@@ -258,11 +389,12 @@ export interface VerifyResult {
 
 export async function verifySignatures(bytes: Uint8Array): Promise<VerifyResult[]> {
   // Byte-level sig extraction. pd-lib's form parser chokes on the
-  // Byte-level parsing avoids pd-lib form-parser edge cases around
-  // large /Contents hex strings. Our job is to find each /V sig dict,
-  // pull /Contents + /ByteRange + metadata with regex, then do the
-  // crypto directly against the concatenated byte ranges. Zero
-  // pd-lib dependency for the hot path.
+  // placeholder-wrapped /V dict produced by @signpdf — its /Contents
+  // is a huge hex string that pd-lib sometimes flags as PDFInvalidObject
+  // mid-parse. Our job is to find each /V sig dict, pull /Contents +
+  // /ByteRange + metadata with regex, then do the crypto directly
+  // against the concatenated byte ranges. Zero pd-lib dependency for
+  // the hot path.
   const text = new TextDecoder('latin1').decode(bytes)
   const results: VerifyResult[] = []
 

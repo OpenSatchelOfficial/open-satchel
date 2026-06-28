@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { PdfPageState } from '../formats/pdf'
 import type { ParagraphEdit } from '../services/pdfParagraphEdits'
-import type { Tool } from '../types/pdf'
 
 interface HistoryEntryMeta {
   label?: string
@@ -52,43 +51,18 @@ interface ParagraphEditsEntry {
   after: ParagraphEdit[] | undefined
 }
 
-/** UI-state history entries — tool selection, ribbon tab order,
- *  ribbon active tab, zoom. Lightweight before/after snapshots so
- *  Ctrl+Z works for "I clicked the wrong tool" / "I dragged the
- *  ribbon and want it back" without a separate undo per state slice. */
-interface UiToolEntry {
-  type: 'ui:tool'
-  before: Tool
-  after: Tool
-}
-
-interface UiRibbonOrderEntry {
-  type: 'ui:ribbonOrder'
-  before: string[]
-  after: string[]
-}
-
-interface UiRibbonTabEntry {
-  type: 'ui:ribbonTab'
-  before: string
-  after: string
-}
-
-interface UiZoomEntry {
-  type: 'ui:zoom'
-  before: number
-  after: number
-}
+// NOTE (2026-06-11, Night-2 decision #2): undo history is DOCUMENT
+// history only. The ui:tool / ui:zoom / ui:ribbonOrder / ui:ribbonTab
+// entry types that used to interleave UI state into Ctrl+Z were
+// removed — tool switches, zoom steps, and ribbon drags are not
+// undoable. pushUndo() additionally rejects any 'ui:'-prefixed type
+// at runtime so stale callers can't reintroduce them silently.
 
 type RawHistoryEntry =
   | FabricEntry
   | PagesEntry
   | PdfStateEntry
   | ParagraphEditsEntry
-  | UiToolEntry
-  | UiRibbonOrderEntry
-  | UiRibbonTabEntry
-  | UiZoomEntry
 
 export type HistoryEntry = RawHistoryEntry & HistoryEntryMeta
 
@@ -111,6 +85,7 @@ interface HistoryState {
   undo: () => HistoryEntry | null
   redo: () => HistoryEntry | null
   clear: () => void
+  dropTab: (tabId: string) => void
 }
 
 const MAX_HISTORY = 100
@@ -125,7 +100,30 @@ function cloneValue<T>(value: T): T {
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       // Runtime-only paint handoff state should never become an undo
       // target; it is derived from pending edits and cleared after render.
-      if (k === '_savePreviewParagraphEdits' || k === '_savePreviewImageEdits') continue
+      // _livePreviewParagraphEdits (Session 6) is the live reflow-preview
+      // channel — neighbor shift edits recomputed on every keystroke,
+      // never persisted and never undoable.
+      if (
+        k === '_savePreviewParagraphEdits' ||
+        k === '_savePreviewImageEdits' ||
+        k === '_livePreviewParagraphEdits'
+      )
+        continue
+      // Save-report fields describe SAVES, not document states: a
+      // snapshot must never carry them, or undo would resurrect a
+      // stale degradation report / post-save toast (Session-1 channel;
+      // applyPdfSnapshot preserves the CURRENT values instead).
+      if (k === '_lastSaveReport' || k === '_postSaveNotices' || k === '_postSaveWarning') continue
+      // NOTE (reverted 2026-06-14): a prior change SHARED the live pdfBytes
+      // reference into snapshots to save memory. That was UNSAFE — pdfBytes is
+      // not in-place-mutated, but pdfjs's worker transfer DETACHES the
+      // underlying ArrayBuffer of any array passed to getDocument WITHOUT a
+      // .slice() (e.g. the auto-tag path, src/services/pdfAutoTag.ts). With a
+      // shared reference, edit -> auto-tag -> undo would restore a neutered
+      // (zero-length) buffer = blank/corrupt document. Deep-copying keeps each
+      // snapshot's bytes independent of any later detach. The memory cost is
+      // bounded by MAX_HISTORY_ESTIMATED_BYTES (128 MB) and the per-tab
+      // dropTab-on-close reclaim; correctness wins over that marginal saving.
       out[k] = cloneValue(v)
     }
     return out as T
@@ -170,10 +168,6 @@ function defaultLabel(entry: HistoryEntry): string {
     case 'paragraph_edits': return 'Paragraph edit'
     case 'pages': return 'Page edit'
     case 'fabric': return 'Annotation edit'
-    case 'ui:tool': return 'Tool change'
-    case 'ui:zoom': return 'Zoom change'
-    case 'ui:ribbonOrder': return 'Ribbon order change'
-    case 'ui:ribbonTab': return 'Ribbon tab change'
   }
 }
 
@@ -208,9 +202,6 @@ function mergeCoalescedEntry(prev: HistoryEntry, next: HistoryEntry): HistoryEnt
     case 'pages':
       merged = { ...next, before: (prev as Extract<HistoryEntry, { type: 'pages' }>).before }
       break
-    case 'ui:zoom':
-      merged = { ...next, before: (prev as Extract<HistoryEntry, { type: 'ui:zoom' }>).before }
-      break
     default:
       merged = next
   }
@@ -238,6 +229,16 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
 
   pushUndo: (entry) =>
     set((state) => {
+      // Document-history-only guard: UI-state slices must never ride
+      // the document undo stack again (Night-2 decision #2). Type
+      // system prevents it for TS callers; this catches JS/test-hook
+      // stragglers at runtime.
+      if (String((entry as { type?: string }).type ?? '').startsWith('ui:')) {
+        console.warn(
+          `historyStore: dropped ${(entry as { type?: string }).type} entry — UI state is not undoable (document history only)`,
+        )
+        return state
+      }
       const next = withMetadata(entry)
       const prev = state.undoStack[state.undoStack.length - 1]
       if (canCoalesce(prev, next)) {
@@ -277,5 +278,27 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
     return entry
   },
 
-  clear: () => set({ undoStack: [], redoStack: [] })
+  clear: () => set({ undoStack: [], redoStack: [] }),
+
+  // Free a closed tab's undo/redo entries. Each pdf_state snapshot holds
+  // the tab's pages/edits (and references its ~33 MB pdfBytes); no close
+  // path purged them before, so a closed heavy doc's history stayed
+  // resident in the GLOBAL stacks until count/byte-cap eviction by other
+  // tabs' edits (gauntlet-installed I-2c history contributor). Entries
+  // carry tabId on every variant, so this is a precise per-tab drop that
+  // leaves other open tabs' history intact.
+  dropTab: (tabId) =>
+    set((state) => {
+      // FabricEntry carries no tabId (canvas-only, no pdfBytes); keep those.
+      // The pdfBytes-heavy variants (pdf_state/pages/paragraph_edits) all
+      // carry tabId, so this precisely drops the closed tab's entries.
+      const keep = (e: HistoryEntry): boolean => {
+        const t = (e as { tabId?: string }).tabId
+        return t === undefined || t !== tabId
+      }
+      return {
+        undoStack: state.undoStack.filter(keep),
+        redoStack: state.redoStack.filter(keep),
+      }
+    }),
 }))

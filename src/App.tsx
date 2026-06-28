@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import AppShell from './components/layout/AppShell'
 import EncryptedOpenDialog from './components/EncryptedOpenDialog'
 import UpdateNoticeToast from './components/UpdateNoticeToast'
+import ConfirmModal from './components/ConfirmModal'
 import { registerGlobalShortcuts } from './lib/shortcuts'
 import { useAutoSave } from './hooks/useAutoSave'
 import { useUIStore, applyAccent } from './stores/uiStore'
@@ -47,18 +48,9 @@ export default function App() {
     return cleanup
   }, [])
 
-  // Subscribe to uiStore.tool / uiStore.zoom and push history entries
-  // so Ctrl+Z reverts the last tool change or zoom step. Lives here
-  // (not in registerGlobalShortcuts) because it's a Zustand
-  // subscription, not a window-keydown listener — clean lifecycle
-  // separation. Subscribed once at mount; unsubscribed on unmount.
-  useEffect(() => {
-    let cleanup: (() => void) | null = null
-    void import('./lib/undo-redo').then(({ subscribeUiHistory }) => {
-      cleanup = subscribeUiHistory()
-    })
-    return () => { cleanup?.() }
-  }, [])
+  // (Removed 2026-06-11, Night-2 decision #2: the uiStore→history
+  // subscription that made tool/zoom changes undoable is gone —
+  // Ctrl+Z is document history only.)
 
   // Global Escape-to-close: when Escape fires anywhere, look for the
   // topmost open modal dialog (matching our `*-dialog` testid convention)
@@ -123,6 +115,7 @@ export default function App() {
       <AppShell />
       <EncryptedOpenDialog />
       <UpdateNoticeToast />
+      <ConfirmModal />
     </>
   )
 }

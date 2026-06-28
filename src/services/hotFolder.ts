@@ -125,6 +125,31 @@ export async function installHotFolderListeners(): Promise<void> {
     console.warn('[cli] pending-args fetch failed:', e)
   }
 
+  // Expose a smoke-test helper on window so the Windows-MCP + DevTools
+  // driver can trigger programmatic watch + unwatch without navigating
+  // the native folder-picker dialogs. Dev-only affordance; safe because
+  // the exposed methods call the same invoke() paths the UI uses.
+  ;(globalThis as unknown as {
+    __smokeHotFolderAdd?: (path: string, actionJson: string | null) => Promise<unknown>
+    __smokeHotFolderList?: () => Promise<unknown>
+    __smokeHotFolderRemove?: (id: string) => Promise<unknown>
+  }).__smokeHotFolderAdd = async (path, actionJson) => {
+    const { invoke } = await import('@tauri-apps/api/core')
+    return await invoke('watch_folder', { path, actionJsonPath: actionJson })
+  }
+  ;(globalThis as unknown as {
+    __smokeHotFolderList?: () => Promise<unknown>
+  }).__smokeHotFolderList = async () => {
+    const { invoke } = await import('@tauri-apps/api/core')
+    return await invoke('list_watched_folders')
+  }
+  ;(globalThis as unknown as {
+    __smokeHotFolderRemove?: (id: string) => Promise<unknown>
+  }).__smokeHotFolderRemove = async (id) => {
+    const { invoke } = await import('@tauri-apps/api/core')
+    return await invoke('unwatch_folder', { id })
+  }
+
   _subscribed = true
 }
 

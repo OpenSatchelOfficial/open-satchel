@@ -84,13 +84,38 @@ export async function writeMetadata(bytes: Uint8Array, meta: PdfMetadata): Promi
 }
 
 export async function stripMetadata(bytes: Uint8Array): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(bytes)
-  doc.setTitle('')
-  doc.setAuthor('')
-  doc.setSubject('')
-  doc.setKeywords([])
-  doc.setCreator('')
-  doc.setProducer('')
+  // Load WITHOUT updateMetadata (it defaults true and would re-stamp a
+  // pd-lib Producer + a fresh ModDate on save, undoing the wipe).
+  const doc = await PDFDocument.load(bytes, { updateMetadata: false })
+  // DELETE the DocInfo entries outright — the old setX('') path left empty
+  // keys (and a pd-lib Producer) behind, which is not a real wipe.
+  const ctx = doc.context
+  const infoRef = ctx.trailerInfo?.Info
+  const info = infoRef ? ctx.lookup(infoRef) : undefined
+  if (info instanceof PDFDict) {
+    for (const key of ['Title', 'Author', 'Subject', 'Keywords', 'Creator', 'Producer', 'CreationDate', 'ModDate']) {
+      try { info.delete(PDFName.of(key)) } catch { /* not present */ }
+    }
+  }
+  // Drop the XMP /Metadata packet too — it usually DUPLICATES the same
+  // identifying fields, so wiping DocInfo alone leaves them recoverable.
+  // Delete BOTH the catalog reference AND the stream object: pd-lib does NOT
+  // garbage-collect, so merely unreferencing the packet leaves the
+  // (author-bearing) bytes in the output. Same for any page-level /Metadata.
+  try {
+    const metaRef = doc.catalog.get(PDFName.of('Metadata'))
+    doc.catalog.delete(PDFName.of('Metadata'))
+    if (metaRef instanceof PDFRef) ctx.delete(metaRef)
+  } catch { /* not present */ }
+  for (const page of doc.getPages()) {
+    try {
+      const pmRef = page.node.get(PDFName.of('Metadata'))
+      page.node.delete(PDFName.of('Metadata'))
+      if (pmRef instanceof PDFRef) ctx.delete(pmRef)
+    } catch { /* not present */ }
+  }
+  // The load-time updateMetadata:false above already suppresses pd-lib's
+  // Producer/ModDate re-stamp (it's a LoadOption, not a SaveOption here).
   return await doc.save()
 }
 

@@ -34,6 +34,12 @@ import {
   type ImageDrawRect,
   type ImageEdit,
 } from '../../services/pdfImageEdits'
+import {
+  fabricJsonHasRedactionMarkForTarget,
+  redactionMarkTargetId,
+  stageElementRedactionMark,
+  type CssRedactionMarkRect,
+} from '../../services/pdfRedactionMarks'
 import type { PdfFormatState } from './index'
 import { PDFDocument, PDFName, PDFRawStream, PDFDict } from 'pdf-lib'
 
@@ -44,6 +50,7 @@ interface Props {
   width: number
   height: number
   active?: boolean
+  markRedactionMode?: boolean
   /** True after the sibling pdfjs canvas has painted the current
    *  pdfDoc. Used to keep post-save image previews visible until the
    *  saved pixels have actually replaced the old canvas. */
@@ -98,6 +105,7 @@ export default function EditableImageLayer({
   width,
   height,
   active = true,
+  markRedactionMode = false,
   renderReady = true,
 }: Props) {
   const [boxes, setBoxes] = useState<ImageBox[]>([])
@@ -110,6 +118,11 @@ export default function EditableImageLayer({
   const layerRef = useRef<HTMLDivElement>(null)
   const dragStartRef = useRef<{ x: number; y: number } | null>(null)
   const suppressedUrlRef = useRef<string | null>(null)
+  const pageFabricJSON = useFormatStore((s): Record<string, unknown> | null => {
+    const state = s.data[tabId] as PdfFormatState | undefined
+    const page = state?.pages.find((p) => p.pageIndex === pageIndex)
+    return page?.fabricJSON ?? null
+  })
 
   // Parse image draws once per (pdfDoc, pageIndex).
   //
@@ -418,6 +431,18 @@ export default function EditableImageLayer({
     writeImageEdits(tabId, pageIndex, merged)
   }
 
+  const markImageForRedaction = (box: ImageBox, rect: CssRedactionMarkRect) => {
+    stageElementRedactionMark({
+      tabId,
+      pageIndex,
+      targetId: redactionMarkTargetId('image', pageIndex, box.id),
+      rect,
+      pageWidth: width,
+      pageHeight: height,
+    })
+    setActiveId(box.id)
+  }
+
   if (!basePageSize || boxes.length === 0) return null
 
   return (
@@ -426,7 +451,7 @@ export default function EditableImageLayer({
       data-testid={`editable-image-layer-${pageIndex}`}
       style={{
         position: 'absolute', inset: 0,
-        pointerEvents: active ? 'auto' : 'none',
+        pointerEvents: active && !markRedactionMode ? 'auto' : 'none',
         zIndex: 4,
       }}
     >
@@ -456,6 +481,8 @@ export default function EditableImageLayer({
         const cssY = (pageH - (box.y + committedDy) - box.height) * scale + liveDy
         const cssW = box.width * scale
         const cssH = box.height * scale
+        const redactionTargetId = redactionMarkTargetId('image', pageIndex, box.id)
+        const isRedactionMarked = fabricJsonHasRedactionMarkForTarget(pageFabricJSON, redactionTargetId)
         const hasMoved =
           Math.abs(committedDx) > 0.01 ||
           Math.abs(committedDy) > 0.01 ||
@@ -518,9 +545,22 @@ export default function EditableImageLayer({
             <div
               data-testid={`image-box-${box.id}`}
               data-xobject={box.xObjectName}
-              onPointerDown={(e) => handlePointerDown(e, box)}
-              onPointerMove={handlePointerMove}
-              onPointerUp={(e) => handlePointerUp(e, box)}
+              onPointerDown={(e) => {
+                if (markRedactionMode) {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  markImageForRedaction(box, {
+                    left: cssX,
+                    top: cssY,
+                    width: cssW,
+                    height: cssH,
+                  })
+                  return
+                }
+                handlePointerDown(e, box)
+              }}
+              onPointerMove={markRedactionMode ? undefined : handlePointerMove}
+              onPointerUp={markRedactionMode ? undefined : (e) => handlePointerUp(e, box)}
               onPointerCancel={() => {
                 dragStartRef.current = null
                 setDragOffset(null)
@@ -529,17 +569,21 @@ export default function EditableImageLayer({
                 position: 'absolute',
                 left: cssX, top: cssY, width: cssW, height: cssH,
                 zIndex: 7,
-                border: activeId === box.id
+                pointerEvents: active ? 'auto' : 'none',
+                border: isRedactionMarked
+                  ? '3px solid #000000'
+                  : activeId === box.id
                   ? '2px solid var(--accent)'
                   : '1px dashed rgba(99, 179, 237, 0.5)',
                 background: 'transparent',
-                cursor: activeId === box.id ? 'grabbing' : 'grab',
+                boxShadow: isRedactionMarked ? '0 0 0 2px rgba(0, 0, 0, 0.20)' : undefined,
+                cursor: markRedactionMode ? 'pointer' : activeId === box.id ? 'grabbing' : 'grab',
                 boxSizing: 'border-box',
                 touchAction: 'none',
               }}
               title={`Image: ${box.xObjectName}${box.rotated ? ' (rotated)' : ''}${!box.cmPresent ? ' — no cm, drag disabled' : ''}`}
             />
-            {activeId === box.id && (
+            {activeId === box.id && !markRedactionMode && (
               <div
                 data-testid={`image-toolbar-${box.id}`}
                 onPointerDown={(e) => e.stopPropagation()}

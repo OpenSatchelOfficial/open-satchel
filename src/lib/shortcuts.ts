@@ -9,7 +9,7 @@
 
 import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
-import { openFile, saveActiveTab, saveActiveTabAs, closeActiveTab } from './actions'
+import { openFile, saveActiveTab, saveActiveTabAs, closeActiveTab, printActiveTab } from './actions'
 import { undo as doUndo, redo as doRedo } from './undo-redo'
 import { toggleFullscreen } from './fullscreen'
 import { shouldEscapeRevertToSelect } from '../formats/pdf/clickDispatcher'
@@ -30,6 +30,7 @@ export type ShortcutId =
   | 'file.open'
   | 'file.save'
   | 'file.save-as'
+  | 'file.print'
   | 'tab.close'
   | 'sidebar.toggle'
   | 'find.open'
@@ -76,6 +77,16 @@ const ACTIONS: ShortcutAction[] = [
     description: 'Save the active tab to a new path',
     defaultBinding: { ctrl: true, shift: true, key: 's' },
     run: () => { void saveActiveTabAs(); return true },
+  },
+  {
+    id: 'file.print',
+    label: 'Print',
+    description: 'Print the active document',
+    // Returns true unconditionally so we always preventDefault — otherwise
+    // the native WebView Ctrl+P fires and prints the whole app DOM (ribbon,
+    // sidebar, tabs), which is the bug this binding exists to stop.
+    defaultBinding: { ctrl: true, key: 'p' },
+    run: () => { void printActiveTab(); return true },
   },
   {
     id: 'tab.close',

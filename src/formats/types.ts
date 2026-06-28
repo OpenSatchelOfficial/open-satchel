@@ -30,8 +30,16 @@ export interface FormatHandler {
   /** Populate the per-tab format state in formatStore from file bytes. */
   load: (tabId: string, bytes: Uint8Array, filePath: string) => Promise<void>
 
-  /** Serialize current state back to bytes for Save/Save As. */
-  save: (tabId: string) => Promise<Uint8Array>
+  /**
+   * Serialize current state back to bytes for Save/Save As.
+   *
+   * `opts.forPrint` requests *ephemeral* bytes for a consumer that never
+   * touches disk (the Print path): produce decrypted, WYSIWYG output and
+   * skip every persistence side effect — no at-rest encryption, no state
+   * mutation, no undo-history clear. Handlers that don't distinguish may
+   * ignore it; only the PDF handler currently honours it.
+   */
+  save: (tabId: string, opts?: { forPrint?: boolean }) => Promise<Uint8Array>
 
   /** Tear down on tab close. Release big objects, worker refs, etc. */
   cleanup?: (tabId: string) => void

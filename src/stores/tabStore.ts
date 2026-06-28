@@ -46,6 +46,9 @@ export const useTabStore = create<TabState & TabActions>((set, get) => ({
   },
 
   closeTab: (id) => {
+    // Capture the closed tab's path BEFORE the filter — the async cleanup
+    // below needs it to invalidate the Rust render cache for this doc (I-2c).
+    const closedPath = get().tabs.find((t) => t.id === id)?.filePath ?? null
     set((state) => {
       const tabs = state.tabs.filter((t) => t.id !== id)
       let activeTabId = state.activeTabId
@@ -70,6 +73,11 @@ export const useTabStore = create<TabState & TabActions>((set, get) => ({
     void (async () => {
       try {
         const { useFormatStore } = await import('./formatStore')
+        // clearFormatState now owns the pdfjs worker-doc release (it is the
+        // single choke point all close paths funnel through — see its comment).
+        // Releasing here too would be redundant AND would miss the real UI
+        // gestures (TabBar X / Ctrl+W) which clearFormatState() before this
+        // async block runs, so getFormatState(id) is already undefined here.
         useFormatStore.getState().clearFormatState(id)
       } catch { /* swallow */ }
       try {
@@ -86,6 +94,30 @@ export const useTabStore = create<TabState & TabActions>((set, get) => ({
         const { invoke } = await import('@tauri-apps/api/core')
         await invoke('engine_reap_pool_workers')
       } catch { /* swallow */ }
+      // I-2c: drop the closed tab's undo/redo history. Its pdf_state
+      // snapshots reference the tab's pdfBytes; no close path purged
+      // history before, so a closed heavy doc lingered in the GLOBAL
+      // stacks until cap eviction by other tabs' edits.
+      try {
+        const { useHistoryStore } = await import('./historyStore')
+        useHistoryStore.getState().dropTab(id)
+      } catch (e) {
+        // Log (not silent): a swallowed failure here means the closed tab's
+        // heavy snapshots silently leak — the exact failure mode being fixed.
+        console.error('[closeTab] history dropTab failed (I-2c reclaim skipped):', e)
+      }
+      // I-2c: invalidate the Rust render-cache PNG vectors for the closed
+      // doc. The cache is keyed by path and was purged only on SAVE — a
+      // closed doc's high-zoom renders (5-20 MB each) otherwise linger
+      // until count-based LRU eviction by other docs' renders.
+      try {
+        if (closedPath) {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('engine_invalidate_render_cache', { path: closedPath })
+        }
+      } catch (e) {
+        console.error('[closeTab] render-cache invalidate failed (I-2c reclaim skipped):', e)
+      }
     })()
   },
 

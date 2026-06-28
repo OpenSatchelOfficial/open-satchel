@@ -26,6 +26,12 @@ export interface SignAppearanceOptions {
  *  Acrobat uses: signer name on the first line, then date, then
  *  reason, location, contact each on their own line if enabled. */
 export function composeAppearancePreview(opts: SignAppearanceOptions): string[] {
+  const out = composeAppearanceLines(opts)
+  if (out.length === 0) out.push('(empty signature stamp - toggle visibility above)')
+  return out
+}
+
+export function composeAppearanceLines(opts: SignAppearanceOptions): string[] {
   const out: string[] = []
   const now = opts.now ?? new Date()
   if (opts.showSignerName && opts.cn) out.push(`Signed by: ${opts.cn}`)
@@ -33,6 +39,5 @@ export function composeAppearancePreview(opts: SignAppearanceOptions): string[] 
   if (opts.showReason && opts.reason) out.push(`Reason: ${opts.reason}`)
   if (opts.showLocation && opts.location) out.push(`Location: ${opts.location}`)
   if (opts.showContact && opts.contactInfo) out.push(`Contact: ${opts.contactInfo}`)
-  if (out.length === 0) out.push('(empty signature stamp — toggle visibility above)')
   return out
 }

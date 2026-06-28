@@ -54,6 +54,8 @@ export default function PasswordDialog({ tabId, onClose, onApply }: Props) {
   const [showPasswords, setShowPasswords] = useState(false)
   const [algorithm, setAlgorithm] = useState<Algorithm>('AES_256')
   const [perms, setPerms] = useState<PermissionFlags>({ ...ALL_PERMS_ON })
+  const [status, setStatus] = useState('')
+  const [removing, setRemoving] = useState(false)
 
   useEffect(() => {
     if (!tabId) return
@@ -101,6 +103,8 @@ export default function PasswordDialog({ tabId, onClose, onApply }: Props) {
     // persist. Route through the pdfCrypto.removeEncryption service
     // (Rust lopdf decrypt + drop /Encrypt). Skip the round-trip when
     // only the in-memory permissions flag was set.
+    setRemoving(true)
+    setStatus('')
     try {
       if (isEncrypted(state.pdfBytes)) {
         const password =
@@ -123,11 +127,14 @@ export default function PasswordDialog({ tabId, onClose, onApply }: Props) {
       }
     } catch (e) {
       console.error('[removeEncryption] failed:', e)
-      // Fall back to clearing the in-memory flag.
-      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
-        ...prev,
-        encryption: undefined,
-      }))
+      setStatus(
+        e instanceof Error
+          ? `Remove protection failed: ${e.message}`
+          : 'Remove protection failed.',
+      )
+      return
+    } finally {
+      setRemoving(false)
     }
     useTabStore.getState().setTabDirty(tabId, true)
     onClose()
@@ -152,8 +159,8 @@ export default function PasswordDialog({ tabId, onClose, onApply }: Props) {
       footerMeta={<>{algorithmLabel(algorithm)} · open-source crypto</>}
       footer={
         <>
-          <button className="os-danger-btn" data-testid="pwd-remove" onClick={removeEncryption}>
-            Remove protection
+          <button className="os-danger-btn" data-testid="pwd-remove" onClick={removeEncryption} disabled={removing}>
+            {removing ? 'Removing...' : 'Remove protection'}
           </button>
           <button className="btn-ghost" onClick={onClose}>
             Cancel
@@ -284,6 +291,22 @@ export default function PasswordDialog({ tabId, onClose, onApply }: Props) {
         {mode === 'empty' &&
           'No protection set. Enter a password OR an owner password with restricted permissions.'}
       </div>
+      {status && (
+        <div
+          data-testid="pwd-status"
+          style={{
+            marginTop: 10,
+            padding: '8px 10px',
+            fontSize: 11.5,
+            background: 'color-mix(in srgb, var(--danger) 14%, transparent)',
+            border: '1px solid var(--hairline)',
+            borderRadius: 6,
+            color: 'var(--text-primary)',
+          }}
+        >
+          {status}
+        </div>
+      )}
     </DialogBase>
   )
 }

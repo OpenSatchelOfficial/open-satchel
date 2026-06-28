@@ -1,6 +1,6 @@
 // Unified click-routing primitives for the PDF editor.
 //
-// Modeless-editing click dispatcher.
+// Phase B of the modeless-editing refactor (docs/MODELESS.md).
 // Today's behavior is implemented via a mix of CSS pointer-events and
 // per-tool Fabric event listeners — it works but the logic is spread
 // across four files. This module centralizes:
@@ -9,7 +9,7 @@
 //      editing on a document, priority-ordered), which are "drop-on-
 //      click" actions (place one object and return to Select), which
 //      are "drag-to-create" (repeat-friendly, tool stays active), etc.
-//   2. The priority table below — for a given tool,
+//   2. The priority table from docs/MODELESS.md — for a given tool,
 //      which layers get first pick at a click.
 //   3. `shouldAutoRevertAfterDrop(tool)` — does this tool auto-revert
 //      to Select after one use? (true for drop-on-click action tools,
@@ -75,6 +75,7 @@ export const TOOL_CATEGORY: Record<Tool, ToolCategory> = {
   highlight_area: 'drag',
   underline: 'drag',
   strikethrough: 'drag',
+  mark_redaction: 'drag',
   redact: 'drag',
   wipe_off: 'drag',
   shape_rect: 'drag',
@@ -103,7 +104,7 @@ export const TOOL_CATEGORY: Record<Tool, ToolCategory> = {
  * represents "nothing under cursor" — for action tools that's where
  * the action fires.
  *
- * Central priority table for modeless click handling.
+ * Matches the "Priority table" in docs/MODELESS.md.
  */
 export function hitTestPriority(tool: Tool): Layer[] {
   const cat = TOOL_CATEGORY[tool]

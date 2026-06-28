@@ -43,6 +43,11 @@ export interface ConvertOptions {
   /** Optional provider override for Standard-14 font substitute bytes.
    *  Defaults to Tauri's `pdfa_get_standard14_substitute` command. */
   standard14Provider?: (psName: string) => Promise<Uint8Array | null>
+  /** Optional provider override for the bundled CJK substitute font
+   *  (Noto Sans SC). Defaults to Tauri's `pdfa_get_cjk_substitute`
+   *  command. Node test harnesses inject a filesystem-backed provider
+   *  that returns the same vendored bytes the Rust command embeds. */
+  cjkProvider?: (baseFont: string) => Promise<Uint8Array | null>
 }
 
 // Default providers — hit the Tauri backend. Overridable via ConvertOptions.
@@ -51,6 +56,13 @@ const defaultIccProvider = async (): Promise<Uint8Array> =>
 
 const defaultStandard14Provider = async (psName: string): Promise<Uint8Array | null> => {
   const sub = await invoke<number[]>('pdfa_get_standard14_substitute', { name: psName })
+  return sub && sub.length > 0 ? new Uint8Array(sub) : null
+}
+
+const defaultCjkProvider = async (baseFont: string): Promise<Uint8Array | null> => {
+  // Tauri v2 marshals camelCase arg names — `baseFont` deserializes to the
+  // Rust `base_font` param.
+  const sub = await invoke<number[]>('pdfa_get_cjk_substitute', { baseFont })
   return sub && sub.length > 0 ? new Uint8Array(sub) : null
 }
 
@@ -78,10 +90,14 @@ export interface ConvertReport {
 export async function embedAndReencodeStandard14(
   bytes: Uint8Array,
   substituteProvider?: (psName: string) => Promise<Uint8Array | null>,
+  cjkProvider?: (baseFont: string) => Promise<Uint8Array | null>,
 ): Promise<Uint8Array> {
   const provider = substituteProvider ?? defaultStandard14Provider
-  const res = await embedMissingFonts(bytes, false, provider)
+  const res = await embedMissingFonts(bytes, false, provider, cjkProvider ?? defaultCjkProvider)
   let work = res.bytes
+  if (res.cidSubstitutes.size > 0) {
+    work = (await rewriteCidSubstitutedText(work, res.cidSubstitutes)).bytes
+  }
   if (res.substitutes.size > 0) {
     work = await rewriteSubstitutedTextEncoding(work, res.substitutes)
   }
@@ -118,8 +134,15 @@ export async function convertToPdfA(
   // ── Step 2: font embedding audit + fix ────────────────────────────
   onProgress(0.20, 'Auditing fonts…')
   const standard14Provider = opts.standard14Provider ?? defaultStandard14Provider
-  const fontReport = await embedMissingFonts(work, opts.failOnFontIssue ?? false, standard14Provider)
+  const cjkProvider = opts.cjkProvider ?? defaultCjkProvider
+  const fontReport = await embedMissingFonts(work, opts.failOnFontIssue ?? false, standard14Provider, cjkProvider)
   work = fontReport.bytes
+  if (fontReport.cjkSubstituted.length > 0) {
+    const detail = fontReport.cjkSubstituted
+      .map((c) => `${c.requested} → ${c.substitute}`)
+      .join(', ')
+    steps.push({ name: 'embedCjkFonts', status: 'done', detail: `Embedded bundled CJK substitute for ${fontReport.cjkSubstituted.length} bare CID font(s): ${detail}` })
+  }
   if (fontReport.unfixed.length > 0) {
     const detail = `${fontReport.unfixed.length} font(s) need manual remediation: ${fontReport.unfixed.join(', ')}`
     if (opts.failOnFontIssue) {
@@ -132,6 +155,28 @@ export async function convertToPdfA(
     steps.push({ name: 'embedFonts', status: 'done', detail: `Substituted ${fontReport.fixed} standard-14 font ref(s)` })
   } else {
     steps.push({ name: 'embedFonts', status: 'skipped', detail: 'All fonts already embedded' })
+  }
+
+  // ── Step 2a-CJK: re-encode + ToUnicode for substituted CID fonts ──
+  // A bare CIDFontType2 (composite font with no embedded program) was
+  // swapped for the bundled Noto Sans SC. Its content stream still holds
+  // the (now-gone) source font's 2-byte GIDs. Re-encode every 2-byte CID
+  // to a Noto GID via the source /ToUnicode (code → Unicode → Noto GID),
+  // then write a fresh /ToUnicode (Noto GID → Unicode) so the output is
+  // both Identity-H-correct and text-selectable. Must run BEFORE the
+  // Standard-14 1-byte pass and the /W rebuild.
+  if (fontReport.cidSubstitutes.size > 0) {
+    onProgress(0.28, 'Re-encoding CJK content streams (Identity-H + ToUnicode)…')
+    try {
+      const cidRes = await rewriteCidSubstitutedText(work, fontReport.cidSubstitutes)
+      work = cidRes.bytes
+      const unmappedNote = cidRes.unmapped > 0 ? `; ${cidRes.unmapped} code(s) had no recoverable Unicode → drawn as .notdef + not in /ToUnicode` : ''
+      steps.push({ name: 'cjkReencode', status: cidRes.unmapped > 0 ? 'warning' : 'done', detail: `Re-encoded + generated /ToUnicode for ${fontReport.cidSubstitutes.size} CJK font(s)${unmappedNote}` })
+      if (cidRes.unmapped > 0) warnings.push(`${cidRes.unmapped} CJK character code(s) had no /ToUnicode mapping and were drawn as .notdef`)
+    } catch (e) {
+      steps.push({ name: 'cjkReencode', status: 'failed', detail: String(e) })
+      throw new Error(`CJK content-stream re-encoding failed: ${e}`)
+    }
   }
 
   // ── Step 2b: content-stream re-encoding (substituted fonts only) ──
@@ -246,6 +291,15 @@ interface FontEmbedResult {
    *  re-encode content-stream text from 1-byte WinAnsi to 2-byte
    *  Identity-H CIDs via the TTF's Unicode cmap. */
   substitutes: Map<string, Uint8Array>
+  /** Map from the NEW (Noto) Type0 font ref to the bytes we embedded +
+   *  the SOURCE font's decoded code→Unicode map (parsed from its
+   *  /ToUnicode CMap). rewriteCidSubstitutedText uses this to re-encode
+   *  every 2-byte CID in the content stream from the (now-gone) source
+   *  font's GIDs to Noto GIDs, then writes a fresh /ToUnicode. */
+  cidSubstitutes: Map<string, { notoBytes: Uint8Array; codeToUnicode: Map<number, string> }>
+  /** CJK fonts that were substituted, for the convert report
+   *  (requested base-font name → bundled substitute family). */
+  cjkSubstituted: { requested: string; substitute: string }[]
 }
 
 // ── WinAnsiEncoding → Unicode mapping ────────────────────────────────
@@ -323,12 +377,45 @@ async function embedMissingFonts(
   bytes: Uint8Array,
   _strict: boolean,
   substituteProvider: (psName: string) => Promise<Uint8Array | null>,
+  cjkProvider: (baseFont: string) => Promise<Uint8Array | null> = defaultCjkProvider,
 ): Promise<FontEmbedResult> {
   const doc = await PDFDocument.load(bytes)
   doc.registerFontkit(fontkit)
   let fixed = 0
   const unfixed: string[] = []
   const substitutes = new Map<string, Uint8Array>()
+  const cidSubstitutes = new Map<string, { notoBytes: Uint8Array; codeToUnicode: Map<number, string> }>()
+  const cjkSubstituted: { requested: string; substitute: string }[] = []
+
+  // The bundled CJK font is large (~7 MB) and identical for every bare
+  // CID reference this session — fetch + parse it at most once.
+  let cjkBytesCache: Uint8Array | null | undefined
+  const getCjkSubstitute = async (baseFont: string): Promise<Uint8Array | null> => {
+    if (cjkBytesCache !== undefined) return cjkBytesCache
+    try {
+      const b = await cjkProvider(baseFont)
+      cjkBytesCache = b && b.length > 0 ? b : null
+    } catch (e) {
+      console.warn('[pdfAConvert] CJK substitute lookup failed:', e)
+      cjkBytesCache = null
+    }
+    return cjkBytesCache
+  }
+
+  // Decode a font dict's /ToUnicode CMap stream to raw CMap bytes. Bare
+  // CID fonts are only recoverable when they carry one — it's the sole
+  // bridge from the source font's GIDs back to Unicode.
+  const readToUnicodeBytes = (font: PDFDict): Uint8Array | null => {
+    const tuRef = font.get(PDFName.of('ToUnicode'))
+    if (!tuRef) return null
+    const tu = doc.context.lookup(tuRef)
+    if (!(tu instanceof PDFRawStream)) return null
+    try {
+      return decodePDFRawStream(tu).decode()
+    } catch {
+      return null
+    }
+  }
 
   // Cache per-PostScript-name embedded fonts so a Standard-14 used on
   // 50 pages doesn't trigger 50 substitution lookups + 50 embeds.
@@ -367,11 +454,13 @@ async function embedMissingFonts(
 
   // First pass — collect every Resources/Font entry that needs fixing.
   // We mutate per-page Resources/Font dicts, so collect first then mutate.
-  type FontSlot = { fontsDict: PDFDict; key: PDFName; psName: string }
+  type FontSlot =
+    | { kind: 'std'; fontsDict: PDFDict; key: PDFName; psName: string }
+    | { kind: 'cid'; fontsDict: PDFDict; key: PDFName; baseFont: string; toUnicodeBytes: Uint8Array }
   const slotsToFix: FontSlot[] = []
   const seenRefs = new Set<string>() // dedupe identical font refs across pages
 
-  const visitFontDict = (fontsDict: PDFDict | undefined) => {
+  const visitFontDict = (fontsDict: PDFDict | undefined, allowCidSubstitution = true) => {
     if (!fontsDict) return
     for (const [key, ref] of fontsDict.entries()) {
       const refKey = `${ref.toString()}:${key.toString()}`
@@ -418,8 +507,32 @@ async function embedMissingFonts(
       const baseFont = baseFontObj ? baseFontObj.toString().replace(/^\//, '') : '<unknown>'
       const psName = baseFont.replace(/^[A-Z]{6}\+/, '')
 
+      // Composite (Type0) font with no embedded program = a bare CID
+      // font — the common un-embedded CJK case. We can only substitute it
+      // when it carries a /ToUnicode CMap (the bridge from its private
+      // GIDs back to Unicode); otherwise the codes are unrecoverable
+      // (a named-CMap decoder, e.g. UniGB-UCS2-H, would be the next layer).
+      const subtype = font.get(PDFName.of('Subtype'))?.toString()
+      if (subtype === '/Type0') {
+        // CID substitution re-encodes the PAGE content stream only. A bare
+        // CID font referenced from a form XObject (or other nested resource)
+        // would be substituted but its content never re-encoded — garbage
+        // GIDs + no /ToUnicode. Don't substitute those; record honestly.
+        if (!allowCidSubstitution) {
+          unfixed.push(`${baseFont} (bare CID font inside a form XObject — CJK substitution is page-level only this session)`)
+          continue
+        }
+        const toUnicodeBytes = readToUnicodeBytes(font)
+        if (toUnicodeBytes) {
+          slotsToFix.push({ kind: 'cid', fontsDict, key, baseFont, toUnicodeBytes })
+        } else {
+          unfixed.push(`${baseFont} (bare CID font, no embedded program and no /ToUnicode to recover text)`)
+        }
+        continue
+      }
+
       if (STANDARD_14.has(psName)) {
-        slotsToFix.push({ fontsDict, key, psName })
+        slotsToFix.push({ kind: 'std', fontsDict, key, psName })
       } else if (SYSTEM_FONT_ALIASES.has(psName)) {
         // Common system font (Arial, Times New Roman, Courier New) that
         // the source PDF referenced without embedding. Map to the
@@ -427,7 +540,7 @@ async function embedMissingFonts(
         // resulting Type0 font. PDF/A §6.3.4-1 requires the font
         // program be embedded; this path satisfies that.
         const alias = SYSTEM_FONT_ALIASES.get(psName)!
-        slotsToFix.push({ fontsDict, key, psName: alias })
+        slotsToFix.push({ kind: 'std', fontsDict, key, psName: alias })
       } else {
         unfixed.push(`${baseFont} (no FontDescriptor)`)
       }
@@ -457,7 +570,7 @@ async function embedMissingFonts(
         if (!xRes) continue
         const xFontsRef = xRes.get(PDFName.of('Font'))
         const xFonts = xFontsRef ? (doc.context.lookup(xFontsRef) as PDFDict | undefined) : undefined
-        visitFontDict(xFonts)
+        visitFontDict(xFonts, false) // CID re-encode is page-level only; don't substitute XObject CID fonts
       }
     }
   }
@@ -465,7 +578,40 @@ async function embedMissingFonts(
   // Second pass — fetch substitutes and rewrite the slots.
   // Track which PS names actually got substituted vs missing-on-system.
   const failedPsNames = new Set<string>()
+  let cjkUnavailableReported = false
   for (const slot of slotsToFix) {
+    if (slot.kind === 'cid') {
+      // Bare CID font → embed the bundled CJK substitute as a fresh
+      // Identity-H CIDFontType2. We re-encode its content stream + write
+      // /ToUnicode later (rewriteCidSubstitutedText), using the source
+      // /ToUnicode captured here.
+      const notoBytes = await getCjkSubstitute(slot.baseFont)
+      if (!notoBytes) {
+        if (!cjkUnavailableReported) {
+          cjkUnavailableReported = true
+          unfixed.push(`${slot.baseFont} (no bundled CJK substitute font available)`)
+        }
+        continue
+      }
+      let embedded
+      try {
+        // subset:false is REQUIRED: we encode content streams to GIDs
+        // ourselves (not via pd-lib's drawText), so pd-lib must embed the
+        // whole program with an Identity CIDToGIDMap — a subset would
+        // renumber/drop the GIDs we write.
+        embedded = await doc.embedFont(notoBytes, { subset: false })
+      } catch (e) {
+        unfixed.push(`${slot.baseFont} (CJK embed failed: ${e})`)
+        continue
+      }
+      slot.fontsDict.set(slot.key, embedded.ref)
+      const codeToUnicode = parseToUnicodeCMap(slot.toUnicodeBytes)
+      cidSubstitutes.set(refKeyFromRef(embedded.ref), { notoBytes, codeToUnicode })
+      cjkSubstituted.push({ requested: slot.baseFont, substitute: 'Noto Sans SC' })
+      fixed++
+      continue
+    }
+
     const sub = await getSubstitute(slot.psName)
     if (!sub) {
       if (!failedPsNames.has(slot.psName)) {
@@ -491,7 +637,17 @@ async function embedMissingFonts(
     fixed++
   }
 
-  return { bytes: new Uint8Array(await doc.save()), fixed, unfixed, substitutes }
+  // NOTE on the substituted-away old font subtree: pd-lib does not
+  // garbage-collect, so each old bare-CID font lingers as an unreferenced
+  // object. Its stale /W array can be >8191 elements (a CJK font has ~21k
+  // glyphs) and would fail PDF/A-1 §6.1.12 even though nothing references
+  // it. Rather than DELETE the subtree (which risks corrupting a font also
+  // reachable from an annotation /AP, AcroForm /DR, Pattern, or a shared
+  // descriptor/program), rebuildCidFontWidths re-chunks every CIDFont's /W
+  // in place — including orphans — to ≤8000-element sub-arrays. Lossless,
+  // reachability-agnostic, and clears the only rule the orphan trips.
+
+  return { bytes: new Uint8Array(await doc.save()), fixed, unfixed, substitutes, cidSubstitutes, cjkSubstituted }
 }
 
 /** Stable string key for a PDFRef — e.g. "15 0 R". Used because
@@ -736,7 +892,14 @@ async function rebuildCidFontWidths(bytes: Uint8Array): Promise<Uint8Array> {
     // substitutes). FontFile3 is CFF / OpenType CFF — substitutes are
     // all TTF so we only handle FontFile2 here.
     const fontFileRef = fontDesc.get(PDFName.of('FontFile2'))
-    if (!fontFileRef) continue
+    if (!fontFileRef) {
+      // No embedded program — we can't recompute widths. But this CIDFont
+      // (e.g. a bare CID font substituted away, now orphaned) may carry a
+      // stale /W with a >8191-element sub-array that fails PDF/A-1 §6.1.12.
+      // Re-chunk it in place (lossless: same widths, smaller sub-arrays).
+      rechunkOversizedWidths(ctx, cidFont)
+      continue
+    }
     const fontFile = ctx.lookup(fontFileRef)
     if (!(fontFile instanceof PDFRawStream)) continue
 
@@ -773,8 +936,20 @@ async function rebuildCidFontWidths(bytes: Uint8Array): Promise<Uint8Array> {
       }
     }
 
-    const widthArr = ctx.obj(widths.map(w => PDFNumber.of(w))) as PDFArray
-    const wTop = ctx.obj([PDFNumber.of(0), widthArr]) as PDFArray
+    // /W = [ cStart [w...] cStart2 [w...] … ]. PDF/A-1 (§6.1.12 test 5,
+    // inherited from the PDF 1.4 implementation limits) caps any array at
+    // 8191 elements, so a CJK font with 20k+ glyphs would overflow a single
+    // [w0 … wN-1] sub-array. Chunk the contiguous widths into sub-arrays of
+    // ≤ 8000 elements, each introduced by its starting CID — the top-level
+    // /W then holds only 2 entries per chunk, well under the limit.
+    const W_CHUNK = 8000
+    const wTopItems: (PDFNumber | PDFArray)[] = []
+    for (let start = 0; start < numGlyphs; start += W_CHUNK) {
+      const slice = widths.slice(start, start + W_CHUNK)
+      wTopItems.push(PDFNumber.of(start))
+      wTopItems.push(ctx.obj(slice.map(w => PDFNumber.of(w))) as PDFArray)
+    }
+    const wTop = ctx.obj(wTopItems) as PDFArray
     cidFont.set(PDFName.of('W'), wTop)
     cidFont.set(PDFName.of('DW'), PDFNumber.of(1000))
 
@@ -799,6 +974,54 @@ async function rebuildCidFontWidths(bytes: Uint8Array): Promise<Uint8Array> {
   }
 
   return new Uint8Array(await doc.save({ useObjectStreams: false }))
+}
+
+/**
+ * Re-chunk a CIDFont's existing `/W` so no sub-array exceeds 8000 elements
+ * (PDF/A-1 §6.1.12). Lossless — preserves the exact CID→width mapping, just
+ * splits an oversized `[cStart [w0 … wN]]` run into consecutive
+ * `[cStart [...]] cStart+k [...]]` runs. Range-form triples (`cFirst cLast w`)
+ * and anything else are copied verbatim. Used for CIDFonts we can't rebuild
+ * from a font program (no FontFile2) — e.g. a substituted-away bare CID font
+ * left orphaned in the file with pd-lib's original 20k-element `/W`.
+ */
+function rechunkOversizedWidths(ctx: PDFDocument['context'], cidFont: PDFDict): void {
+  const wEntry = cidFont.get(PDFName.of('W'))
+  const w = wEntry ? ctx.lookup(wEntry) : null
+  if (!(w instanceof PDFArray)) return
+
+  let oversized = false
+  for (let i = 0; i < w.size(); i++) {
+    const el = ctx.lookup(w.get(i))
+    if (el instanceof PDFArray && el.size() > 8000) { oversized = true; break }
+  }
+  if (!oversized) return
+
+  const newItems: (PDFNumber | PDFArray)[] = []
+  let i = 0
+  while (i < w.size()) {
+    const a = ctx.lookup(w.get(i))
+    const b = i + 1 < w.size() ? ctx.lookup(w.get(i + 1)) : null
+    if (a instanceof PDFNumber && b instanceof PDFArray) {
+      const start = Number(a.toString())
+      if (b.size() <= 8000) {
+        newItems.push(PDFNumber.of(start), b)
+      } else {
+        for (let off = 0; off < b.size(); off += 8000) {
+          const end = Math.min(off + 8000, b.size())
+          const chunk: PDFNumber[] = []
+          for (let j = off; j < end; j++) chunk.push(PDFNumber.of(Number(b.get(j)?.toString() ?? '0')))
+          newItems.push(PDFNumber.of(start + off), ctx.obj(chunk) as PDFArray)
+        }
+      }
+      i += 2
+    } else {
+      // Range-form number (cFirst/cLast/w) or stray element — copy verbatim.
+      newItems.push(w.get(i) as PDFNumber)
+      i += 1
+    }
+  }
+  cidFont.set(PDFName.of('W'), ctx.obj(newItems) as PDFArray)
 }
 
 interface FlattenResult { bytes: Uint8Array; flattenedPages: number }
@@ -1027,4 +1250,333 @@ function setPdfVersion(bytes: Uint8Array, version: string): Uint8Array {
   const verBytes = new TextEncoder().encode(version)
   out.set(verBytes, 5)
   return out
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// CJK bare-CID substitution support
+//
+// A composite (Type0) font with no embedded font program is the common
+// un-embedded CJK case (e.g. /BaseFont /STSong-Light). PDF/A forbids it.
+// We embed the bundled Noto Sans SC as a fresh Identity-H CIDFontType2,
+// then re-encode the content stream's 2-byte codes from the source font's
+// GIDs to Noto GIDs (via the source /ToUnicode → Unicode → Noto GID) and
+// write a fresh /ToUnicode so the output is selectable. RTL, multiple CJK
+// faces in one doc, CFF-keyed (FontFile3), and vertical writing stay
+// recorded residuals (KNOWN-LIMITATIONS §4).
+// ─────────────────────────────────────────────────────────────────────
+
+/** Convert a run of UTF-16BE hex (4 hex per code unit) to a JS string. */
+function hexToUtf16String(hex: string): string {
+  let s = ''
+  for (let i = 0; i + 4 <= hex.length; i += 4) {
+    s += String.fromCharCode(parseInt(hex.slice(i, i + 4), 16))
+  }
+  return s
+}
+
+/**
+ * Parse a /ToUnicode CMap stream into a code → Unicode string map. Codes
+ * are the 2-byte values the content stream uses; values are the decoded
+ * Unicode (usually one BMP char, occasionally a multi-char sequence).
+ * Handles both `beginbfchar`/`endbfchar` and `beginbfrange`/`endbfrange`
+ * (single-dst and array-dst forms) — the shapes pd-lib and real-world
+ * exporters emit.
+ */
+function parseToUnicodeCMap(bytes: Uint8Array): Map<number, string> {
+  const map = new Map<number, string>()
+  const text = new TextDecoder('latin1').decode(bytes)
+
+  const bfcharRe = /beginbfchar([\s\S]*?)endbfchar/g
+  let block: RegExpExecArray | null
+  while ((block = bfcharRe.exec(text))) {
+    const pairRe = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g
+    let p: RegExpExecArray | null
+    while ((p = pairRe.exec(block[1]))) {
+      map.set(parseInt(p[1], 16), hexToUtf16String(p[2]))
+    }
+  }
+
+  const bfrangeRe = /beginbfrange([\s\S]*?)endbfrange/g
+  while ((block = bfrangeRe.exec(text))) {
+    // Forms: <lo> <hi> <dst>   |   <lo> <hi> [ <d0> <d1> ... ]
+    const entryRe = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*(\[[^\]]*\]|<[0-9A-Fa-f]+>)/g
+    let e: RegExpExecArray | null
+    while ((e = entryRe.exec(block[1]))) {
+      const lo = parseInt(e[1], 16)
+      const hi = parseInt(e[2], 16)
+      const dst = e[3]
+      if (dst.startsWith('[')) {
+        const arr = [...dst.matchAll(/<([0-9A-Fa-f]+)>/g)].map((x) => hexToUtf16String(x[1]))
+        for (let c = lo, i = 0; c <= hi && i < arr.length; c++, i++) map.set(c, arr[i])
+      } else {
+        const startHex = dst.slice(1, -1)
+        const units: number[] = []
+        for (let i = 0; i + 4 <= startHex.length; i += 4) units.push(parseInt(startHex.slice(i, i + 4), 16))
+        if (units.length === 0) continue
+        for (let c = lo; c <= hi; c++) {
+          // Increment the destination as a big-endian integer across ALL its
+          // 16-bit units, carrying into the higher units (per the CMap spec —
+          // the destination is a single value, not just the last unit).
+          const u = units.slice()
+          let carry = c - lo
+          for (let k = u.length - 1; k >= 0 && carry > 0; k--) {
+            const sum = u[k] + carry
+            u[k] = sum & 0xffff
+            carry = sum >>> 16
+          }
+          map.set(c, String.fromCharCode(...u))
+        }
+      }
+    }
+  }
+  return map
+}
+
+/**
+ * Emit a valid PostScript /ToUnicode CMap from a GID → Unicode-string map.
+ * GIDs are the Identity-H 2-byte codes in the content stream (we use an
+ * Identity CIDToGIDMap, so code == CID == GID). Destinations are full
+ * strings so a one-glyph ligature/combining sequence keeps all its
+ * characters in the text layer. Chunks `bfchar` into blocks of 100 (the
+ * PostScript per-block limit).
+ *
+ * A Unicode string → UTF-16BE hex (handles multi-char destinations like
+ * ligatures / combining sequences, and supplementary-plane surrogates —
+ * JS strings already hold those as surrogate pairs, so charCodeAt yields
+ * the correct UTF-16BE units).
+ */
+function stringToUtf16beHex(s: string): string {
+  let out = ''
+  for (let i = 0; i < s.length; i++) {
+    out += s.charCodeAt(i).toString(16).padStart(4, '0').toUpperCase()
+  }
+  return out
+}
+
+function buildToUnicodeCMap(gidToUnicode: Map<number, string>): string {
+  const entries = [...gidToUnicode.entries()].filter(([, s]) => s.length > 0).sort((a, b) => a[0] - b[0])
+  const lines: string[] = [
+    '/CIDInit /ProcSet findresource begin',
+    '12 dict begin',
+    'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+    '/CMapName /Adobe-Identity-UCS def',
+    '/CMapType 2 def',
+    '1 begincodespacerange',
+    '<0000> <FFFF>',
+    'endcodespacerange',
+  ]
+  for (let i = 0; i < entries.length; i += 100) {
+    const chunk = entries.slice(i, i + 100)
+    lines.push(`${chunk.length} beginbfchar`)
+    for (const [gid, str] of chunk) {
+      lines.push(`<${gid.toString(16).padStart(4, '0').toUpperCase()}> <${stringToUtf16beHex(str)}>`)
+    }
+    lines.push('endbfchar')
+  }
+  lines.push('endcmap', 'CMapName currentdict /CMap defineresource pop', 'end', 'end')
+  return lines.join('\n')
+}
+
+/**
+ * Public helper (brief API): build a /ToUnicode CMap by reversing the
+ * embedded font's own cmap (GID → Unicode) via fontkit, optionally
+ * restricted to `usedGids`. The PDF/A pipeline prefers the
+ * actually-rendered GID→Unicode map (buildToUnicodeCMap), but this proves
+ * the standalone "parse font cmap → ToUnicode" path the spec calls for and
+ * backstops any used GID the rendered map missed.
+ */
+export function generateToUnicodeCMap(ttfBytes: Uint8Array, usedGids?: Set<number>): string {
+  const font = (fontkit as unknown as {
+    create: (b: Uint8Array) => {
+      characterSet?: number[]
+      glyphForCodePoint: (cp: number) => { id: number } | null
+    }
+  }).create(ttfBytes)
+
+  // Codepoints to reverse: the font's own characterSet when fontkit
+  // exposes it, else the bundled subset's coverage ranges.
+  let codepoints: number[] | null = Array.isArray(font.characterSet) ? font.characterSet : null
+  if (!codepoints) {
+    codepoints = []
+    for (let cp = 0x20; cp <= 0x7e; cp++) codepoints.push(cp)
+    for (let cp = 0x3000; cp <= 0x303f; cp++) codepoints.push(cp)
+    for (let cp = 0x4e00; cp <= 0x9fff; cp++) codepoints.push(cp)
+    for (let cp = 0xff00; cp <= 0xffef; cp++) codepoints.push(cp)
+  }
+
+  const gidToUnicode = new Map<number, string>()
+  for (const cp of codepoints) {
+    let gid = 0
+    try {
+      gid = font.glyphForCodePoint(cp)?.id ?? 0
+    } catch {
+      gid = 0
+    }
+    if (gid === 0) continue
+    if (usedGids && !usedGids.has(gid)) continue
+    if (!gidToUnicode.has(gid)) gidToUnicode.set(gid, String.fromCodePoint(cp)) // first (lowest) cp wins
+  }
+  return buildToUnicodeCMap(gidToUnicode)
+}
+
+interface CidFontKit {
+  glyphForCodePoint: (cp: number) => { id: number } | null
+}
+
+interface CidSubEntry {
+  fk: CidFontKit
+  codeToUnicode: Map<number, string>
+  notoBytes: Uint8Array
+  // gid → the FULL source Unicode string (a one-glyph ligature/combining
+  // sequence keeps every character in the generated /ToUnicode, even though
+  // the substitute renders a single glyph for it).
+  usedGidToUnicode: Map<number, string>
+  fontDict?: PDFDict
+  unmapped: number
+}
+
+/** Re-encode one 2-byte CID string from source GIDs to Noto GIDs. */
+function reencodeCidString(src: CSPdfString, entry: CidSubEntry): CSPdfString {
+  const v = src.value
+  const pairs = Math.floor(v.length / 2)
+  if (pairs * 2 !== v.length) entry.unmapped++ // odd trailing byte (malformed) — count it
+  const out = new Uint8Array(pairs * 2)
+  for (let i = 0; i < pairs; i++) {
+    const code = (v[i * 2] << 8) | v[i * 2 + 1]
+    const uni = entry.codeToUnicode.get(code)
+    let gid = 0
+    if (uni && uni.length > 0) {
+      // The glyph is chosen from the FIRST codepoint (one source glyph maps
+      // to one substitute glyph), but the /ToUnicode keeps the WHOLE string
+      // so extraction/search of a ligature stays lossless.
+      const cp = uni.codePointAt(0) ?? 0
+      try {
+        gid = entry.fk.glyphForCodePoint(cp)?.id ?? 0
+      } catch {
+        gid = 0
+      }
+      if (gid !== 0) entry.usedGidToUnicode.set(gid, uni)
+      else entry.unmapped++
+    } else {
+      entry.unmapped++
+    }
+    out[i * 2] = (gid >> 8) & 0xff
+    out[i * 2 + 1] = gid & 0xff
+  }
+  return { type: 'hex', value: out, decoded: src.decoded }
+}
+
+/**
+ * Walk every page, re-encode the content-stream text of each substituted
+ * bare-CID font to Noto GIDs, and write a fresh /ToUnicode CMap onto the
+ * new Type0 font dict. Mirrors rewriteSubstitutedTextEncoding but for the
+ * 2-byte CID path. `cidSubstitutes` is keyed by the NEW (Noto) font ref —
+ * object numbers survive pd-lib's save/reload, so the keys captured during
+ * embedMissingFonts still resolve here (same invariant the 1-byte path
+ * relies on).
+ */
+async function rewriteCidSubstitutedText(
+  bytes: Uint8Array,
+  cidSubstitutes: Map<string, { notoBytes: Uint8Array; codeToUnicode: Map<number, string> }>,
+): Promise<{ bytes: Uint8Array; unmapped: number }> {
+  if (cidSubstitutes.size === 0) return { bytes, unmapped: 0 }
+
+  const doc = await PDFDocument.load(bytes)
+  const ctx = doc.context
+
+  const byRefKey = new Map<string, CidSubEntry>()
+  for (const [refKey, info] of cidSubstitutes) {
+    let fk: CidFontKit
+    try {
+      fk = (fontkit as unknown as { create: (b: Uint8Array) => CidFontKit }).create(info.notoBytes)
+    } catch {
+      continue
+    }
+    byRefKey.set(refKey, {
+      fk,
+      codeToUnicode: info.codeToUnicode,
+      notoBytes: info.notoBytes,
+      usedGidToUnicode: new Map(),
+      unmapped: 0,
+    })
+  }
+  if (byRefKey.size === 0) return { bytes, unmapped: 0 }
+
+  for (let pageIdx = 0; pageIdx < doc.getPageCount(); pageIdx++) {
+    const page = doc.getPage(pageIdx)
+    const resources = ctx.lookup(page.node.get(PDFName.of('Resources')))
+    if (!(resources instanceof PDFDict)) continue
+    const fontsDict = ctx.lookup(resources.get(PDFName.of('Font')))
+    if (!(fontsDict instanceof PDFDict)) continue
+
+    const pageSubs = new Map<string, CidSubEntry>()
+    for (const [key, refOrDict] of fontsDict.entries()) {
+      if (!(refOrDict instanceof PDFRef)) continue
+      const entry = byRefKey.get(refKeyFromRef(refOrDict))
+      if (!entry) continue
+      if (!entry.fontDict) {
+        const d = ctx.lookup(refOrDict)
+        if (d instanceof PDFDict) entry.fontDict = d
+      }
+      pageSubs.set(key.toString().replace(/^\//, ''), entry)
+    }
+    if (pageSubs.size === 0) continue
+
+    const contentInfo = getPageContentBytes(doc, pageIdx)
+    if (!contentInfo || contentInfo.bytes.length === 0) continue
+    const parsed = parseContentStream(contentInfo.bytes)
+    let activeFontKey: string | null = null
+    let rewroteAny = false
+
+    for (const op of parsed.operators) {
+      if (op.operator === 'Tf') {
+        const nameArg = op.args[0] as string
+        activeFontKey = typeof nameArg === 'string' ? nameArg.replace(/^\//, '') : null
+        continue
+      }
+      if (!activeFontKey) continue
+      const entry = pageSubs.get(activeFontKey)
+      if (!entry) continue
+
+      if (op.operator === 'Tj' || op.operator === "'") {
+        const newStr = reencodeCidString(op.args[0] as CSPdfString, entry)
+        replaceTextOp(op, newStr, op.operator)
+        rewroteAny = true
+      } else if (op.operator === '"') {
+        const newStr = reencodeCidString(op.args[2] as CSPdfString, entry)
+        replaceQuotationOp(op, op.args[0] as number, op.args[1] as number, newStr)
+        rewroteAny = true
+      } else if (op.operator === 'TJ') {
+        const arr = op.args[0] as TJArrayElement[]
+        const newArr: TJArrayElement[] = arr.map((el) =>
+          el.kind === 'string' ? { kind: 'string', value: reencodeCidString(el.value, entry) } : el,
+        )
+        replaceTJOp(op, newArr)
+        rewroteAny = true
+      }
+    }
+
+    if (rewroteAny) {
+      const rewritten = serializeContentStream(parsed.operators, contentInfo.bytes)
+      replacePageContents(doc, pageIdx, rewritten)
+    }
+  }
+
+  // Write a fresh /ToUnicode onto each substituted Type0 dict, scoped to
+  // the GIDs actually used on the page (keeps the CMap small + exact).
+  for (const entry of byRefKey.values()) {
+    if (!entry.fontDict) continue
+    const cmapStr = buildToUnicodeCMap(entry.usedGidToUnicode)
+    const cmapBytes = new TextEncoder().encode(cmapStr)
+    const tuDict = ctx.obj({ Length: cmapBytes.length })
+    const tuStream = PDFRawStream.of(tuDict, cmapBytes)
+    const tuRef = ctx.register(tuStream)
+    entry.fontDict.set(PDFName.of('ToUnicode'), tuRef)
+  }
+
+  let unmapped = 0
+  for (const entry of byRefKey.values()) unmapped += entry.unmapped
+
+  return { bytes: new Uint8Array(await doc.save({ useObjectStreams: false })), unmapped }
 }

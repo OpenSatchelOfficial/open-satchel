@@ -6,8 +6,13 @@ export interface StampDef {
    *  apply time, so two stamps placed an hour apart get different
    *  timestamps. Acrobat parity (A9). */
   text: string
+  label?: string
   color: string
   bgColor: string
+  fontSize?: number
+  minWidth?: number
+  maxWidth?: number
+  angle?: number
   /** Optional preset id — when present, the stamp library shows
    *  expanded preview text in the swatch grid. */
   id?: string
@@ -15,6 +20,17 @@ export interface StampDef {
 
 const CUSTOM_STAMPS_KEY = 'open-satchel:custom-stamps'
 const USER_NAME_KEY = 'open-satchel:user-name'
+export const DEFAULT_TEXT_STAMP_TEMPLATE = 'Reviewed by {user} on {date}'
+
+export const STAMP_TOKEN_SHORTCUTS = [
+  { label: 'Date', token: '{date}' },
+  { label: 'Time', token: '{time}' },
+  { label: 'User', token: '{user}' },
+  { label: 'Full', token: '{user-full}' },
+  { label: 'Day', token: '{day}' },
+  { label: 'DateTime', token: '{datetime}' },
+  { label: 'ISO', token: '{date-iso}' },
+] as const
 
 /** Read the configured user name (set in Preferences flyout) for
  *  dynamic stamp tokens. Falls back to "User" so stamps still
@@ -128,24 +144,52 @@ export function removeCustomStamp(id: string): void {
 
 export const STAMPS: StampDef[] = [
   // Static stamps
-  { id: 'approved', text: 'APPROVED', color: '#a6e3a1', bgColor: 'rgba(166,227,161,0.15)' },
-  { id: 'rejected', text: 'REJECTED', color: '#f38ba8', bgColor: 'rgba(243,139,168,0.15)' },
-  { id: 'draft', text: 'DRAFT', color: '#f9e2af', bgColor: 'rgba(249,226,175,0.15)' },
-  { id: 'confidential', text: 'CONFIDENTIAL', color: '#f38ba8', bgColor: 'rgba(243,139,168,0.15)' },
-  { id: 'final', text: 'FINAL', color: '#89b4fa', bgColor: 'rgba(137,180,250,0.15)' },
-  { id: 'copy', text: 'COPY', color: '#6c7086', bgColor: 'rgba(108,112,134,0.15)' },
-  { id: 'void', text: 'VOID', color: '#f38ba8', bgColor: 'rgba(243,139,168,0.15)' },
-  { id: 'urgent', text: 'URGENT', color: '#fab387', bgColor: 'rgba(250,179,135,0.15)' },
-  { id: 'reviewed', text: 'REVIEWED', color: '#a6e3a1', bgColor: 'rgba(166,227,161,0.15)' },
-  { id: 'sign-here', text: 'SIGN HERE', color: '#cba6f7', bgColor: 'rgba(203,166,247,0.15)' },
+  { id: 'approved', text: 'APPROVED', color: '#1f7a4d', bgColor: 'rgba(31,122,77,0.10)' },
+  { id: 'rejected', text: 'REJECTED', color: '#b42318', bgColor: 'rgba(180,35,24,0.10)' },
+  { id: 'draft', text: 'DRAFT', color: '#9a6700', bgColor: 'rgba(154,103,0,0.10)' },
+  { id: 'confidential', text: 'CONFIDENTIAL', color: '#93370d', bgColor: 'rgba(147,55,13,0.10)', minWidth: 156 },
+  { id: 'final', text: 'FINAL', color: '#175cd3', bgColor: 'rgba(23,92,211,0.10)' },
+  { id: 'copy', text: 'COPY', color: '#475467', bgColor: 'rgba(71,84,103,0.10)' },
+  { id: 'void', text: 'VOID', color: '#b42318', bgColor: 'rgba(180,35,24,0.10)' },
+  { id: 'urgent', text: 'URGENT', color: '#b54708', bgColor: 'rgba(181,71,8,0.10)' },
+  { id: 'reviewed', text: 'REVIEWED', color: '#1f7a4d', bgColor: 'rgba(31,122,77,0.10)' },
+  { id: 'sign-here', text: 'SIGN HERE', color: '#6941c6', bgColor: 'rgba(105,65,198,0.10)' },
   // Dynamic stamps — A9 Acrobat parity. Tokens expand at apply time
   // via `expandStampTokens`; placing the same stamp twice with an
   // hour between yields two different timestamps.
-  { id: 'approved-dyn', text: 'APPROVED · {user} · {date}', color: '#a6e3a1', bgColor: 'rgba(166,227,161,0.15)' },
-  { id: 'reviewed-dyn', text: 'REVIEWED {date} {time}', color: '#a6e3a1', bgColor: 'rgba(166,227,161,0.15)' },
-  { id: 'received-dyn', text: 'RECEIVED {date}', color: '#89b4fa', bgColor: 'rgba(137,180,250,0.15)' },
-  { id: 'signed-dyn', text: 'SIGNED · {user-full} · {datetime}', color: '#cba6f7', bgColor: 'rgba(203,166,247,0.15)' },
+  { id: 'approved-dyn', label: 'Approved Date', text: 'APPROVED · {user} · {date}', color: '#1f7a4d', bgColor: 'rgba(31,122,77,0.10)', fontSize: 13, minWidth: 170 },
+  { id: 'reviewed-dyn', label: 'Reviewed Time', text: 'REVIEWED {date} {time}', color: '#1f7a4d', bgColor: 'rgba(31,122,77,0.10)', fontSize: 13, minWidth: 170 },
+  { id: 'received-dyn', label: 'Received', text: 'RECEIVED {date}', color: '#175cd3', bgColor: 'rgba(23,92,211,0.10)', fontSize: 13, minWidth: 136 },
+  { id: 'signed-dyn', label: 'Signed', text: 'SIGNED · {user-full} · {datetime}', color: '#6941c6', bgColor: 'rgba(105,65,198,0.10)', fontSize: 13, minWidth: 210 },
 ]
+
+export const TEXT_STAMP_INDEX = STAMPS.length
+
+export function makeTextStampDef(template: string): StampDef {
+  const text = template.trim() || DEFAULT_TEXT_STAMP_TEMPLATE
+  return {
+    id: 'text-stamp',
+    label: 'Text Stamp',
+    text,
+    color: '#175cd3',
+    bgColor: 'rgba(23,92,211,0.09)',
+    fontSize: 13,
+    minWidth: 150,
+    maxWidth: 360,
+    angle: 0,
+  }
+}
+
+function estimateTextWidth(text: string, fontSize: number): number {
+  let width = 0
+  for (const ch of text) {
+    if (ch === ' ') width += fontSize * 0.32
+    else if (/[A-Z0-9]/.test(ch)) width += fontSize * 0.62
+    else if (/[il.,:;]/.test(ch)) width += fontSize * 0.28
+    else width += fontSize * 0.52
+  }
+  return width
+}
 
 export function applyStampTool(
   canvas: Canvas,
@@ -164,35 +208,55 @@ export function applyStampTool(
     // an hour apart get different timestamps. Static stamps pass
     // through unchanged (no `{...}` tokens to match).
     const expandedText = expandStampTokens(stamp.text)
-    const textWidth = expandedText.length * 14 + 30
+    const lines = expandedText.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    const safeLines = lines.length > 0 ? lines : [DEFAULT_TEXT_STAMP_TEMPLATE]
+    const fontSize = stamp.fontSize ?? 15
+    const lineHeightPx = Math.ceil(fontSize * 1.28)
+    const maxLineWidth = Math.max(...safeLines.map((line) => estimateTextWidth(line, fontSize)))
+    const textWidth = Math.max(
+      stamp.minWidth ?? 96,
+      Math.min(stamp.maxWidth ?? 340, Math.ceil(maxLineWidth + 34)),
+    )
+    const height = Math.max(34, safeLines.length * lineHeightPx + 16)
 
     const bg = new Rect({
       width: textWidth,
-      height: 40,
+      height,
       fill: stamp.bgColor,
       stroke: stamp.color,
-      strokeWidth: 3,
-      rx: 4,
-      ry: 4
+      strokeWidth: 1.5,
+      rx: 3,
+      ry: 3
     })
 
-    const label = new Textbox(expandedText, {
-      width: textWidth,
-      top: 8,
-      left: 0,
-      fontSize: 18,
+    const bar = new Rect({
+      width: 4,
+      height,
       fill: stamp.color,
-      fontFamily: 'Impact, "Arial Black", sans-serif',
-      fontWeight: 'bold',
-      textAlign: 'center',
-      editable: false
+      strokeWidth: 0,
+      rx: 2,
+      ry: 2
     })
 
-    const group = new Group([bg, label], {
+    const label = new Textbox(safeLines.join('\n'), {
+      width: textWidth - 20,
+      top: 8,
+      left: 13,
+      fontSize,
+      fill: stamp.color,
+      fontFamily: 'Arial, Helvetica, sans-serif',
+      fontWeight: '700',
+      lineHeight: 1.05,
+      charSpacing: 20,
+      textAlign: safeLines.length > 1 ? 'left' : 'center',
+      editable: false,
+    })
+
+    const group = new Group([bg, bar, label], {
       left: pointer.x,
       top: pointer.y,
       selectable: true,
-      angle: -15
+      angle: stamp.angle ?? 0
     })
 
     ;(group as any).__isStamp = true

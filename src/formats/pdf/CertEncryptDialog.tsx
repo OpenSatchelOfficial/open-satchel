@@ -15,12 +15,10 @@
 //     before the user fires the encrypt.
 
 import { useRef, useState } from 'react'
-import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
-import type { PdfFormatState } from './index'
-import { encryptPdfToCerts } from '../../services/pdfCryptoPubKey'
 import DialogBase from '../../components/DialogBase'
 import forge from 'node-forge'
+import { finalizeSecurityCopy } from '../../services/pdfSecurityFinalize'
 
 interface Props {
   tabId: string
@@ -74,6 +72,7 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
   const [recipients, setRecipients] = useState<RecipientCert[]>([])
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
+  const [confirming, setConfirming] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const addCertFiles = async (files: FileList | null) => {
@@ -98,33 +97,34 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
     setRecipients((prev) => prev.filter((_, i) => i !== idx))
   }
 
-  const handleEncrypt = async () => {
+  const suggestedCopyName = () => {
+    const tab = useTabStore.getState().tabs.find((t) => t.id === tabId)
+    const base = (tab?.fileName || 'document.pdf').replace(/\.pdf$/i, '')
+    return `${base}-cert-encrypted.pdf`
+  }
+
+  const handleEncrypt = async (saveDraft: boolean) => {
     if (recipients.length === 0) {
       setStatus('Add at least one recipient certificate.')
       return
     }
-    const state = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
-    if (!state) {
-      setStatus('No PDF state.')
-      return
-    }
     setBusy(true)
-    setStatus('Encrypting…')
+    setConfirming(false)
+    setStatus(saveDraft ? 'Saving draft, then creating encrypted copy...' : 'Creating encrypted copy...')
     try {
-      const out = await encryptPdfToCerts(state.pdfBytes, {
+      if (saveDraft) {
+        const actions = await import('../../lib/actions')
+        await actions.saveActiveTab()
+      }
+      const result = await finalizeSecurityCopy(tabId, {
+        kind: 'cert-encrypt',
         recipientCertsPem: recipients.map((r) => r.pem),
+        suggestedName: suggestedCopyName(),
       })
-      // Replace pdfBytes in the format store so subsequent saves use
-      // the encrypted bytes. Mark dirty so the user can Ctrl+S into a
-      // file path of their choice.
-      useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
-        ...prev,
-        pdfBytes: out,
-      }))
-      useTabStore.getState().setTabDirty(tabId, true)
       setStatus(
-        `Encrypted to ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}. ` +
-        `File is now V=5 AES-256 cert-encrypted; save with Ctrl+S to write to disk.`,
+        result.path
+          ? `Created encrypted copy for ${recipients.length} recipient${recipients.length === 1 ? '' : 's'}. Original tab is unchanged.`
+          : 'Encrypted bytes were created, but Save As was canceled. Original tab is unchanged.',
       )
     } catch (e) {
       setStatus((e as Error).message)
@@ -149,10 +149,10 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
           <button
             className="btn-primary"
             data-testid="cert-encrypt-apply"
-            onClick={handleEncrypt}
+            onClick={() => setConfirming(true)}
             disabled={busy || recipients.length === 0}
           >
-            {busy ? 'Encrypting…' : 'Encrypt'}
+            {busy ? 'Encrypting…' : 'Create encrypted copy...'}
           </button>
         </>
       }
@@ -168,10 +168,12 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
           onChange={(e) => addCertFiles(e.target.files)}
           style={{ marginTop: 4 }}
         />
-        {/* Programmatic-click button kept so accessibility tooling can
-            trigger the file picker. The native <input type=file> only
-            opens its picker on a real user gesture, so this button
-            invokes .click() on the hidden input on user activation. */}
+        {/* Programmatic-click button so headless tests can fire the
+            file picker via the patched HTMLInputElement.prototype.click
+            (test-hooks/dialog-handlers pdf_inject_picked_file). The
+            native <input type=file> only opens its picker on a real
+            user gesture, so dispatched MouseEvents from dom_click
+            don't trigger the picker codepath. */}
         <button
           type="button"
           className="btn-secondary"
@@ -183,9 +185,36 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
         </button>
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
           PEM (.pem/.crt) or DER (.cer/.der) X.509 certificates. Each
-          cert's matching private key will be required to decrypt.
+          cert's matching private key will be required to decrypt. Open Satchel
+          creates a protected copy and leaves this working tab unchanged.
         </div>
       </div>
+
+      {confirming && (
+        <div data-testid="security-finalize-prompt" style={{
+          margin: '10px 0',
+          padding: 10,
+          border: '1px solid var(--warn)',
+          borderRadius: 6,
+          background: 'rgba(230, 180, 0, 0.10)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 8,
+        }}>
+          <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text-primary)' }}>
+            Create a certificate-encrypted copy?
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+            Finish edits before encrypting. The copy can only be opened by holders of the matching
+            private keys; this original tab stays editable and unencrypted in memory.
+          </div>
+          <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            <button type="button" className="btn-ghost" onClick={() => setConfirming(false)} disabled={busy}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={() => void handleEncrypt(true)} disabled={busy}>Save Draft First</button>
+            <button type="button" className="btn-primary" onClick={() => void handleEncrypt(false)} disabled={busy}>Create Protected Copy</button>
+          </div>
+        </div>
+      )}
 
       {recipients.length > 0 && (
         <div className="os-field">
@@ -232,7 +261,7 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
             marginTop: 10,
             padding: '8px 10px',
             fontSize: 11.5,
-            background: status.startsWith('Encrypted')
+            background: status.startsWith('Created')
               ? 'color-mix(in srgb, var(--success) 14%, transparent)'
               : 'color-mix(in srgb, var(--danger) 14%, transparent)',
             border: '1px solid var(--hairline)',

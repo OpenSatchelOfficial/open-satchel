@@ -1,6 +1,6 @@
 // Full 35-format taxonomy preserved from the Electron codebase so copied
 // components/handlers keep compiling. Only PDF has a registered handler
-// in this release; other formats land as the engines mature.
+// in v1 — see DEFERRED_FORMATS.md for what lands in v1.1+.
 
 export type DocumentFormat =
   | 'pdf'

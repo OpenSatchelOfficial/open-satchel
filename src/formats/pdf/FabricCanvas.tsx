@@ -5,13 +5,13 @@ import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
 import type { PdfFormatState } from './index'
 import { applySelectTool } from '../../components/editor/SelectTool'
-import { applyTextTool } from '../../components/editor/TextTool'
 import { applyDrawTool } from '../../components/editor/DrawTool'
 import { applyImageTool } from '../../components/editor/ImageTool'
 import { applyHighlightTool } from '../../components/editor/HighlightTool'
-import { applyShapeTool } from '../../components/editor/ShapeTool'
+import { applyRedactionMarkTool, syncRedactionMarkerOverlays } from '../../components/editor/RedactionMarkTool'
+import { applyShapeTool, decorateArrowLines } from '../../components/editor/ShapeTool'
 import { applyStickyNoteTool } from '../../components/editor/StickyNoteTool'
-import { applyStampTool, STAMPS } from '../../components/editor/StampTool'
+import { applyStampTool, makeTextStampDef, STAMPS, TEXT_STAMP_INDEX } from '../../components/editor/StampTool'
 import { placeSignature } from '../../components/editor/SignatureTool'
 import SignatureDialog from '../../components/signature/SignatureDialog'
 import {
@@ -52,8 +52,12 @@ const CUSTOM_PROPS = [
   // look up to decide whether to emit /Link, /Sound, /Movie, or text-
   // edit annotations. toJSON() strips any property not listed here -
   // omitting __linkUrl etc. silently drops the feature on save.
-  '__linkUrl', '__mediaUrl', '__mediaKind', '__insertText',
-  '__isArrow', '__watermark',
+  '__annotationType', '__linkUrl', '__mediaUrl', '__mediaKind', '__insertText',
+  '__isArrow', '__watermark', '__imageDataUrl',
+  '__isStickyNote', '__isComment', '__kind', '__author', '__createdAt',
+  '__id', '__contents', '__color', '__status', '__parentId', '__replies',
+  '__nativeStickyMarker', '__nativeStickyImported', '__nativeStickySnapshot',
+  '__redactionMarked', '__redactionTargetId', '__redactionOverlay',
 ]
 
 function serializeFabricCanvas(fc: FabricCanvasClass): Record<string, unknown> {
@@ -119,6 +123,7 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
   const shapeStrokeWidth = useUIStore((s) => s.shapeStrokeWidth)
   const noteColor = useUIStore((s) => s.noteColor)
   const selectedStamp = useUIStore((s) => s.selectedStamp)
+  const textStampTemplate = useUIStore((s) => s.textStampTemplate)
 
   const fabricJSON = useFormatStore((s) => {
     const state = s.data[tabId] as PdfFormatState | undefined
@@ -129,7 +134,9 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
   const saveState = useCallback(() => {
     const fc = fabricRef.current
     if (!fc) return
+    if ((fc as any).__dragCreateActive) return
     if (hydratingRef.current) return
+    syncRedactionMarkerOverlays(fc)
     const json = serializeFabricCanvas(fc)
     // Only mark the tab dirty when the Fabric object set actually
     // changed. Without this gate, saveState fires during canvas init,
@@ -168,6 +175,8 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
         }
         return
       }
+      decorateArrowLines(fc)
+      syncRedactionMarkerOverlays(fc)
       fc.renderAll()
       hydratingRef.current = false
     }
@@ -209,21 +218,39 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
       preserveObjectStacking: true
     })
 
-    // Browser-mode escape hatch: expose the Fabric canvas keyed by
-    // tabId:pageIndex so development tools can inspect objects
-    // without DOM-pixel simulation. No-op in production because
-    // nothing reads it.
+    // Testing escape hatch: expose the Fabric canvas keyed by
+    // tabId:pageIndex so the MCP ribbon-test driver can call Fabric
+    // APIs directly (fire events, list objects) without DOM-pixel
+    // simulation. No-op in production because nothing reads it.
     if (typeof window !== 'undefined') {
       const w = window as any
       if (!w.__testFabric) w.__testFabric = {}
+      ;(fc as any).__testMouseHandlers = handlersRef.current
       w.__testFabric[`${tabId}:${pageIndex}`] = fc
+    }
+
+    const syncRedactionMarkers = () => {
+      syncRedactionMarkerOverlays(fc)
+      fc.renderAll()
     }
 
     fc.on('object:added', saveState)
     fc.on('object:modified', saveState)
     fc.on('object:removed', saveState)
+    fc.on('object:moving', syncRedactionMarkers)
+    fc.on('object:scaling', syncRedactionMarkers)
+    fc.on('object:rotating', syncRedactionMarkers)
 
-    // After a drop-on-click action tool
+    const openCommentsForStickySelection = (evt: any) => {
+      const selected = (evt?.selected ?? [evt?.target]).filter(Boolean)
+      if (!selected.some((obj: any) => obj.__isStickyNote || obj.__kind === 'sticky_note')) return
+      const ui = useUIStore.getState()
+      if (!ui.showComments) ui.toggleComments()
+    }
+    fc.on('selection:created', openCommentsForStickySelection)
+    fc.on('selection:updated', openCommentsForStickySelection)
+
+    // Phase B of docs/MODELESS.md: after a drop-on-click action tool
     // commits its object, flip back to Select. Matches Word / Docs /
     // Notion / Canva UX where action tools are one-shot. Drag-to-
     // create tools (draw, highlight, shape, measure) keep their tool
@@ -249,6 +276,11 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
 
     return () => {
       saveState()
+      if (typeof window !== 'undefined') {
+        const w = window as any
+        const key = `${tabId}:${pageIndex}`
+        if (w.__testFabric?.[key] === fc) delete w.__testFabric[key]
+      }
       fc.dispose()
       fabricRef.current = null
     }
@@ -368,9 +400,22 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
       }
     })
 
+    const saveRedactionAuthoringState = () => {
+      const ui = useUIStore.getState()
+      if (ui.autoSaveEnabled) {
+        ui.setAutoSaveEnabled(false)
+        ui.setSaveNotice({
+          tone: 'warn',
+          message: 'Autosave turned off while redactions are marked. Use Save when you are ready to permanently apply them.',
+          expiresAt: Date.now() + 10000,
+        })
+      }
+      saveState()
+    }
+
     switch (tool) {
       case 'edit_text':
-        // In Edit Text mode we KEEP the
+        // Phase C of docs/MODELESS.md. In Edit Text mode we KEEP the
         // Fabric canvas interactive so user-placed annotations (Add
         // Text box, sticky notes, shapes, etc.) stay clickable — but
         // we disable marquee drag-select, because dragging across
@@ -383,19 +428,35 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
         fc.defaultCursor = 'default'
         break
       case 'select': applySelectTool(fc); break
-      case 'text': applyTextTool(patchedCanvas as any, textOptions, saveState); break
+      case 'text':
+        // Add Text is handled by EditableParagraphLayer so newly placed
+        // text uses the same fixed-box editor as Edit Text, not Fabric's
+        // separate Textbox selection model.
+        fc.selection = false
+        fc.skipTargetFind = false
+        fc.defaultCursor = 'text'
+        break
       case 'draw': applyDrawTool(fc, drawingOptions); break
       case 'image': applyImageTool(patchedCanvas as any, saveState); break
       case 'highlight': applyHighlightTool(patchedCanvas as any, 'highlight', highlightColor, saveState); break
       case 'underline': applyHighlightTool(patchedCanvas as any, 'underline', highlightColor, saveState); break
       case 'strikethrough': applyHighlightTool(patchedCanvas as any, 'strikethrough', '#f38ba8', saveState); break
-      case 'redact': applyHighlightTool(patchedCanvas as any, 'redact', '#000000', saveState); break
+      case 'mark_redaction': applyRedactionMarkTool(patchedCanvas as any, saveRedactionAuthoringState); break
+      case 'redact': applyHighlightTool(patchedCanvas as any, 'redact', '#000000', saveRedactionAuthoringState); break
       case 'shape_rect': applyShapeTool(patchedCanvas as any, 'rectangle', shapeColor, shapeStrokeWidth, saveState); break
       case 'shape_circle': applyShapeTool(patchedCanvas as any, 'circle', shapeColor, shapeStrokeWidth, saveState); break
       case 'shape_line': applyShapeTool(patchedCanvas as any, 'line', shapeColor, shapeStrokeWidth, saveState); break
       case 'shape_arrow': applyShapeTool(patchedCanvas as any, 'arrow', shapeColor, shapeStrokeWidth, saveState); break
-      case 'sticky_note': applyStickyNoteTool(patchedCanvas as any, noteColor, saveState); break
-      case 'stamp': applyStampTool(patchedCanvas as any, STAMPS[selectedStamp] || STAMPS[0], saveState); break
+      case 'sticky_note': applyStickyNoteTool(patchedCanvas as any, noteColor, () => {
+        saveState()
+        const ui = useUIStore.getState()
+        if (!ui.showComments) ui.toggleComments()
+      }); break
+      case 'stamp': applyStampTool(
+        patchedCanvas as any,
+        selectedStamp === TEXT_STAMP_INDEX ? makeTextStampDef(textStampTemplate) : STAMPS[selectedStamp] || STAMPS[0],
+        saveState,
+      ); break
       // ---- Comment / annotation tools (WPS-parity) ----
       case 'wipe_off': applyWipeOffTool(patchedCanvas as any, saveState); break
       case 'highlight_area': applyHighlightAreaTool(patchedCanvas as any, highlightColor, saveState); break
@@ -433,7 +494,7 @@ export default function FabricCanvas({ tabId, pageIndex, width, height, pdfDoc, 
         break
       default: applySelectTool(fc)
     }
-  }, [tool, drawingOptions, textOptions, highlightColor, shapeColor, shapeStrokeWidth, noteColor, selectedStamp, saveState, removeCustomHandlers])
+  }, [tool, drawingOptions, textOptions, highlightColor, shapeColor, shapeStrokeWidth, noteColor, selectedStamp, textStampTemplate, saveState, removeCustomHandlers])
 
   const handleSignatureConfirm = useCallback(async (dataUrl: string) => {
     const fc = fabricRef.current

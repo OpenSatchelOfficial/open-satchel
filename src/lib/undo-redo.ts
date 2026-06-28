@@ -16,11 +16,8 @@ import {
 } from '../stores/historyStore'
 import { useFormatStore } from '../stores/formatStore'
 import { useTabStore } from '../stores/tabStore'
-import { useUIStore } from '../stores/uiStore'
 import type { PdfFormatState } from '../formats/pdf'
 import type { ParagraphEdit } from '../services/pdfParagraphEdits'
-import type { Tool } from '../types/pdf'
-import type { PdfRibbonTab } from '../components/layout/toolbarOrder'
 
 /** Apply a history entry's "direction" to the page state. For undo we
  *  want `entry.before`; for redo we want `entry.after`. Callers pick. */
@@ -58,7 +55,18 @@ export function redo(): boolean {
 }
 
 function applyPdfSnapshot(tabId: string, snapshot: PdfHistorySnapshot): void {
-  useFormatStore.getState().setFormatState(tabId, clonePdfHistorySnapshot(snapshot))
+  const restored = clonePdfHistorySnapshot(snapshot)
+  // Save-report fields track SAVES, not document states. Snapshots
+  // exclude them (historyStore cloneValue), so carry the CURRENT
+  // values across — undo must neither wipe the live save report nor
+  // resurrect a stale one (Session-1 degradation channel).
+  const current = useFormatStore.getState().getFormatState<Record<string, unknown>>(tabId)
+  if (current) {
+    for (const k of ['_lastSaveReport', '_postSaveNotices', '_postSaveWarning']) {
+      if (current[k] !== undefined) (restored as Record<string, unknown>)[k] = current[k]
+    }
+  }
+  useFormatStore.getState().setFormatState(tabId, restored)
   useTabStore.getState().setTabDirty(tabId, true)
 }
 
@@ -88,71 +96,11 @@ function applyEntry(entry: HistoryEntry, dir: 'before' | 'after'): void {
       // pick this up via its own subscription; if not, consumers can
       // listen on historyStore changes directly.
       return
-    case 'ui:tool':
-      withReplay(() => {
-        useUIStore.getState().setTool((dir === 'before' ? entry.before : entry.after) as Tool)
-      })
-      return
-    case 'ui:zoom':
-      withReplay(() => {
-        useUIStore.setState({ zoom: dir === 'before' ? entry.before : entry.after })
-      })
-      return
-    case 'ui:ribbonOrder': {
-      const setter = (window as Window & {
-        __pdfRibbonSetTabs?: (t: PdfRibbonTab[]) => void
-      }).__pdfRibbonSetTabs
-      if (!setter) return
-      withReplay(() => {
-        setter((dir === 'before' ? entry.before : entry.after) as PdfRibbonTab[])
-      })
-      return
-    }
-    case 'ui:ribbonTab':
-      // The ribbon tab is local component state in PdfToolbar; we don't
-      // currently surface a setter for it. Skip silently rather than
-      // throw — the entry just becomes a no-op replay.
-      return
   }
 }
 
-// ───────────────────────────────────────────────────────────────────
-// UI subscription — pushes `ui:tool` / `ui:zoom` history entries when
-// useUIStore values change. Called once at app startup.
-// Returns the unsubscribe function for symmetric cleanup.
-// ───────────────────────────────────────────────────────────────────
-
-import { isReplaying } from '../stores/historyStore'
-
-let _uiSubscribed = false
-export function subscribeUiHistory(): () => void {
-  if (_uiSubscribed) return () => { /* already subscribed */ }
-  _uiSubscribed = true
-  let lastTool = useUIStore.getState().tool
-  let lastZoom = useUIStore.getState().zoom
-  const unsub = useUIStore.subscribe((state) => {
-    if (isReplaying()) {
-      lastTool = state.tool
-      lastZoom = state.zoom
-      return
-    }
-    if (state.tool !== lastTool) {
-      useHistoryStore.getState().pushUndo({ type: 'ui:tool', before: lastTool, after: state.tool })
-      lastTool = state.tool
-    }
-    if (state.zoom !== lastZoom) {
-      useHistoryStore.getState().pushUndo({
-        type: 'ui:zoom',
-        before: lastZoom,
-        after: state.zoom,
-        label: 'Zoom change',
-        coalesceKey: 'ui:zoom',
-      })
-      lastZoom = state.zoom
-    }
-  })
-  return () => {
-    _uiSubscribed = false
-    unsub()
-  }
-}
+// Night-2 decision #2 (2026-06-11): undo is DOCUMENT history only.
+// The uiStore subscription that pushed ui:tool / ui:zoom entries and
+// the ui:* replay cases were removed at this seam — tool switches,
+// zoom steps, and ribbon drags are no longer undoable. historyStore
+// rejects 'ui:'-prefixed entries at runtime as the backstop.

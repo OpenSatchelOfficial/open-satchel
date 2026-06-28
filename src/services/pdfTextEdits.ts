@@ -14,6 +14,8 @@
 
 import { PDFDocument, rgb, StandardFonts } from 'pdf-lib'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
+import { substitutionDetail } from './saveDegradations'
+import type { SaveDegradationCollector } from './saveDegradations'
 import {
   parseContentStream,
   getPageContentBytes,
@@ -51,12 +53,20 @@ export async function applyTextEditsToBytes(
   pageIndex: number,
   edits: TextLayerEdit[],
   pdfjsDoc: PDFDocumentProxy | null,
+  collector?: SaveDegradationCollector,
 ): Promise<Uint8Array> {
   if (edits.length === 0) return pdfBytes
 
   const doc = await PDFDocument.load(pdfBytes)
   const streamData = getPageContentBytes(doc, pageIndex)
-  if (!streamData) return pdfBytes
+  if (!streamData) {
+    collector?.record({
+      area: 'serializer.text_edit_dropped',
+      detail: `page ${pageIndex}: no readable content stream; ${edits.length} text edit(s) dropped`,
+      pageIndex,
+    })
+    return pdfBytes
+  }
 
   const parsed = parseContentStream(streamData.bytes)
   let streamModified = false
@@ -66,10 +76,20 @@ export async function applyTextEditsToBytes(
     const run = parsed.textRuns[edit.spanIndex]
     if (!run) {
       // Span has no matching content-stream run — fall back to whiteout.
+      collector?.record({
+        area: 'text.span_whiteout',
+        detail: `page ${pageIndex} span ${edit.spanIndex}: no matching content-stream run; whiteout fallback`,
+        pageIndex,
+      })
       whiteoutEdits.push(edit)
       continue
     }
     if (runIsCMapEncoded(run.rawString)) {
+      collector?.record({
+        area: 'text.span_whiteout',
+        detail: `page ${pageIndex} span ${edit.spanIndex}: CMap/hex-encoded run cannot be rewritten in place; whiteout fallback`,
+        pageIndex,
+      })
       whiteoutEdits.push(edit)
       continue
     }
@@ -84,6 +104,18 @@ export async function applyTextEditsToBytes(
     writePageContentBytes(streamData.stream, newStreamBytes, true)
   }
 
+  if (whiteoutEdits.length > 0 && !pdfjsDoc) {
+    // No pdfjs doc → the whiteout fallback can't run AT ALL: the
+    // original text stays in place and the replacement is never
+    // drawn. Security-adjacent (the "removed" text remains) — found
+    // by the Session-1 preflight audit; previously fully silent.
+    collector?.record({
+      area: 'text.whiteout_unavailable',
+      detail: `page ${pageIndex}: ${whiteoutEdits.length} edit(s) needed the whiteout fallback but no pdfjs document was available; original text left in place`,
+      pageIndex,
+    })
+  }
+
   if (whiteoutEdits.length > 0 && pdfjsDoc) {
     try {
       const { items } = await extractTextItems(pdfjsDoc, pageIndex)
@@ -92,7 +124,14 @@ export async function applyTextEditsToBytes(
 
       for (const edit of whiteoutEdits) {
         const item = items[edit.spanIndex]
-        if (!item) continue
+        if (!item) {
+          collector?.record({
+            area: 'text.edit_dropped',
+            detail: `page ${pageIndex} span ${edit.spanIndex}: no extracted text item for whiteout; edit dropped`,
+            pageIndex,
+          })
+          continue
+        }
 
         // Slightly oversize the rect so antialiasing fringes don't peek through.
         const pad = item.height * 0.15
@@ -114,12 +153,33 @@ export async function applyTextEditsToBytes(
             font,
             color: rgb(0, 0, 0),
           })
+          // Session 4 (gate-3 P1-2): the redraw is ALWAYS Helvetica
+          // regardless of the span's original face, and this success
+          // branch recorded nothing — the one font substitution that
+          // survived the session silent. The legacy span path has no
+          // family recovery (items[].fontName is a pdfjs internal
+          // id), so the requested marker is explicit about that; the
+          // classifier files unrecognized families as FIDELITY.
+          collector?.record({
+            area: 'font.substituted',
+            detail: substitutionDetail(
+              '(unrecovered span font)',
+              'Helvetica',
+              `path=text-layer whiteout redraw, page ${pageIndex} span ${edit.spanIndex}`,
+            ),
+            pageIndex,
+          })
         }
       }
     } catch (err) {
       // Whiteout is best-effort — if pdfjs text extraction fails we'd
       // rather preserve the standard-encoding edits than reject the whole call.
       console.error('[pdfTextEdits] whiteout fallback failed:', err)
+      collector?.record({
+        area: 'text.whiteout_failed',
+        detail: `page ${pageIndex}: whiteout fallback threw (${err instanceof Error ? err.message : String(err)}); ${whiteoutEdits.length} edit(s) incomplete`,
+        pageIndex,
+      })
     }
   }
 

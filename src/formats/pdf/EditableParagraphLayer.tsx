@@ -18,15 +18,39 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useUIStore } from '../../stores/uiStore'
 import { withReplay } from '../../stores/historyStore'
 import {
   clusterParagraphs,
+  getParagraphStyledRunsFromStream,
   getParagraphTextColorsFromStream,
   sampleParagraphBackgrounds,
   type ParagraphBox,
   type TextItem,
 } from '../../services/pdfParagraphs'
-import type { ParagraphEdit, TextAlign } from '../../services/pdfParagraphEdits'
+import {
+  blockedAutoReflowMessage,
+  obstacleBlockedAutoReflowMessage,
+} from '../../services/pdfLayoutIntelligence'
+import {
+  flowEditBlockedByObstacle,
+  computeReflowDeltasWithReport,
+  type ReflowParagraph,
+} from '../../services/pdfReflow'
+import {
+  type ParagraphEdit,
+  type TextAlign,
+  type StyledRun,
+  editCarriesRunStyling,
+  expandParagraphBboxForDecorationMask,
+  expandParagraphEditMaskForDecorations,
+  paragraphStyleHasDecoration,
+  syncRunsToEdit,
+} from '../../services/pdfParagraphEdits'
+import {
+  growParagraphBboxForStyledText,
+  paragraphStylePatchNeedsAutoGrow,
+} from '../../services/pdfParagraphAutoGrow'
 import { runOcr } from '../../services/pdfOcr'
 import {
   clusterOcrPageToParagraphs,
@@ -38,7 +62,29 @@ import {
   skipBboxFromParagraphBbox,
   useEngineStrippedRender,
 } from '../../hooks/useEngineStrippedRender'
+import {
+  fabricJsonHasRedactionMarkForTarget,
+  redactionMarkTargetId,
+  stageElementRedactionMark,
+} from '../../services/pdfRedactionMarks'
 import type { PdfFormatState } from './index'
+
+// Project the live page clusters into the lightweight shape the reflow
+// service plans with, so blur-time gating runs the exact same geometric
+// obstacle check the save path will run.
+function toReflowParagraphs(paragraphs: ParagraphBox[]): ReflowParagraph[] {
+  return paragraphs.map((p) => ({
+    paragraphId: p.id,
+    bbox: { ...p.bbox },
+    originalText: p.originalText,
+    fontSize: p.fontSize,
+    fontFamily: p.fontFamily,
+    layoutRole: p.layout?.role,
+    layoutSafeForAutoReflow: p.layout?.safeForAutoReflow,
+    layoutFlowId: p.layout?.flowId,
+    layoutReasons: p.layout?.reasons,
+  }))
+}
 
 // Walk a contenteditable's children and produce the user-visible text
 // with newlines preserved. Handles <br>, block-level wrappers (<div>,
@@ -81,6 +127,197 @@ function readMultilineText(el: HTMLElement): string {
   return result
 }
 
+// ── Rich-text run helpers ────────────────────────────────────────────
+// Per-selection formatting stores a paragraph as StyledRun[] (see
+// pdfParagraphEdits). The contentEditable is the live source of truth while
+// editing: we seed it from runs (runsToHtml) and read runs back out
+// (readStyledRuns); the browser owns the span DOM + caret, we only
+// serialize at the boundaries. fontSize is stored in PDF pt but rendered as
+// CSS px scaled by the current zoom, so px = pt * scale on the way in and
+// pt = px / scale on the way out.
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** CSS color (rgb()/rgba()/#hex) → #rrggbb, or undefined when unparseable. */
+function cssColorToHex(c: string | undefined | null): string | undefined {
+  if (!c) return undefined
+  const s = c.trim()
+  if (/^#[0-9a-f]{6}$/i.test(s)) return s.toLowerCase()
+  if (/^#[0-9a-f]{3}$/i.test(s)) {
+    return ('#' + s.slice(1).split('').map((ch) => ch + ch).join('')).toLowerCase()
+  }
+  const m = s.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i)
+  if (m) {
+    const h = (n: string) => Math.max(0, Math.min(255, parseInt(n, 10))).toString(16).padStart(2, '0')
+    return `#${h(m[1])}${h(m[2])}${h(m[3])}`
+  }
+  return undefined
+}
+
+/** Inline CSS for one run — only fields it explicitly sets, so unset fields
+ *  inherit the editor's box-level default styling. */
+function runInlineStyle(run: StyledRun, scale: number): string {
+  const parts: string[] = []
+  if (run.bold !== undefined) parts.push(`font-weight:${run.bold ? 'bold' : 'normal'}`)
+  if (run.italic !== undefined) parts.push(`font-style:${run.italic ? 'italic' : 'normal'}`)
+  if (run.underline !== undefined || run.strikethrough !== undefined) {
+    const deco = [run.underline ? 'underline' : '', run.strikethrough ? 'line-through' : '']
+      .filter(Boolean).join(' ')
+    parts.push(`text-decoration-line:${deco || 'none'}`)
+  }
+  if (run.color) parts.push(`color:${run.color}`)
+  if (run.fontSize !== undefined) parts.push(`font-size:${run.fontSize * scale}px`)
+  return parts.join(';')
+}
+
+/** Serialize runs → contentEditable innerHTML (one <span> per styled run,
+ *  <br> for embedded newlines). */
+function runsToHtml(runs: StyledRun[], scale: number): string {
+  return runs
+    .map((run) => {
+      const style = runInlineStyle(run, scale)
+      const inner = run.text.split('\n').map(escapeHtml).join('<br>')
+      return style ? `<span style="${style}">${inner}</span>` : inner
+    })
+    .join('')
+}
+
+interface ResolvedRunStyle {
+  bold?: boolean
+  italic?: boolean
+  underline?: boolean
+  strikethrough?: boolean
+  color?: string
+  fontSize?: number
+}
+
+/** Resolve a DOM text node's effective character style by walking its
+ *  ancestor chain up to (not including) the editor div. Nearest-defining
+ *  ancestor wins per property; properties no ancestor sets stay undefined
+ *  (→ inherit the paragraph default). */
+function resolveNodeStyle(node: Node, editorEl: HTMLElement, scale: number): ResolvedRunStyle {
+  const out: ResolvedRunStyle = {}
+  let cur: Node | null = node.parentNode
+  while (cur && cur !== editorEl && cur.nodeType === 1) {
+    const e = cur as HTMLElement
+    const tag = e.nodeName
+    const st = e.style
+    if (out.bold === undefined) {
+      if (tag === 'B' || tag === 'STRONG') out.bold = true
+      else if (st.fontWeight === 'bold' || st.fontWeight === 'bolder') out.bold = true
+      else if (st.fontWeight === 'normal' || st.fontWeight === 'lighter') out.bold = false
+      else if (st.fontWeight) { const n = parseInt(st.fontWeight, 10); if (!isNaN(n)) out.bold = n >= 600 }
+    }
+    if (out.italic === undefined) {
+      if (tag === 'I' || tag === 'EM') out.italic = true
+      else if (st.fontStyle) out.italic = st.fontStyle === 'italic' || st.fontStyle === 'oblique'
+    }
+    const deco = st.textDecorationLine || st.textDecoration
+    if (deco) {
+      if (out.underline === undefined && /underline/.test(deco)) out.underline = true
+      if (out.strikethrough === undefined && /line-through/.test(deco)) out.strikethrough = true
+      if (deco.trim() === 'none') {
+        if (out.underline === undefined) out.underline = false
+        if (out.strikethrough === undefined) out.strikethrough = false
+      }
+    }
+    if (out.underline === undefined && tag === 'U') out.underline = true
+    if (out.strikethrough === undefined && (tag === 'S' || tag === 'STRIKE' || tag === 'DEL')) out.strikethrough = true
+    if (out.color === undefined && st.color) out.color = cssColorToHex(st.color)
+    if (out.fontSize === undefined && st.fontSize.endsWith('px')) {
+      const px = parseFloat(st.fontSize)
+      if (!isNaN(px) && scale > 0) out.fontSize = px / scale
+    }
+    cur = cur.parentNode
+  }
+  return out
+}
+
+/** Read the editor DOM back into StyledRun[], merging adjacent text with
+ *  identical effective style and preserving newlines like readMultilineText. */
+function readStyledRuns(editorEl: HTMLElement, scale: number): StyledRun[] {
+  const BLOCK = new Set(['DIV', 'P', 'LI', 'BLOCKQUOTE', 'PRE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6'])
+  const segs: { text: string; style: ResolvedRunStyle; key: string }[] = []
+  let lastNewline = true
+  const keyOf = (s: ResolvedRunStyle) =>
+    JSON.stringify([s.bold ?? null, s.italic ?? null, s.underline ?? null, s.strikethrough ?? null, s.color ?? null, s.fontSize ?? null])
+  const emit = (text: string, style: ResolvedRunStyle) => {
+    if (!text) return
+    const key = keyOf(style)
+    const last = segs[segs.length - 1]
+    if (last && last.key === key) last.text += text
+    else segs.push({ text, style, key })
+    lastNewline = text.endsWith('\n')
+  }
+  const emitNewline = () => {
+    const last = segs[segs.length - 1]
+    if (last) { last.text += '\n' } else segs.push({ text: '\n', style: {}, key: keyOf({}) })
+    lastNewline = true
+  }
+  const walk = (node: Node): void => {
+    if (node.nodeType === 3) {
+      const t = node.textContent ?? ''
+      if (t.length > 0) emit(t, resolveNodeStyle(node, editorEl, scale))
+      return
+    }
+    if (node.nodeType !== 1) return
+    const e = node as Element
+    if (e.nodeName === 'BR') { emitNewline(); return }
+    const isBlock = BLOCK.has(e.nodeName)
+    if (isBlock && !lastNewline && segs.length > 0) emitNewline()
+    for (const child of Array.from(e.childNodes)) walk(child)
+    if (isBlock && !lastNewline) emitNewline()
+  }
+  for (const child of Array.from(editorEl.childNodes)) walk(child)
+  const last = segs[segs.length - 1]
+  if (last && last.text.endsWith('\n')) {
+    last.text = last.text.slice(0, -1)
+    if (last.text === '') segs.pop()
+  }
+  return segs.map((s) => ({ text: s.text, ...s.style }))
+}
+
+/** Apply a character style to the current selection inside `editorEl`. Uses
+ *  execCommand for bold/italic/underline/strike/color (the browser handles
+ *  split/merge + toggle-off correctly) and a manual span wrap for arbitrary
+ *  pt font sizes (execCommand 'fontSize' only supports the 1–7 scale).
+ *  Returns false when there is no usable selection inside the editor. */
+type CharStyleAttr = 'bold' | 'italic' | 'underline' | 'strikethrough' | 'color' | 'fontSize'
+function formatSelection(
+  editorEl: HTMLElement,
+  attr: CharStyleAttr,
+  value: boolean | string | number,
+  scale: number,
+): boolean {
+  const sel = typeof window !== 'undefined' ? window.getSelection() : null
+  if (!sel || sel.rangeCount === 0) return false
+  const range = sel.getRangeAt(0)
+  if (range.collapsed || !editorEl.contains(range.commonAncestorContainer)) return false
+  try { document.execCommand('styleWithCSS', false, 'true') } catch { /* not fatal */ }
+  switch (attr) {
+    case 'bold': return document.execCommand('bold')
+    case 'italic': return document.execCommand('italic')
+    case 'underline': return document.execCommand('underline')
+    case 'strikethrough': return document.execCommand('strikeThrough')
+    case 'color': return document.execCommand('foreColor', false, String(value))
+    case 'fontSize': {
+      const span = document.createElement('span')
+      span.style.fontSize = `${Number(value) * scale}px`
+      try {
+        span.appendChild(range.extractContents())
+        range.insertNode(span)
+        const nr = document.createRange()
+        nr.selectNodeContents(span)
+        sel.removeAllRanges()
+        sel.addRange(nr)
+      } catch { return false }
+      return true
+    }
+  }
+}
+
 interface Props {
   tabId: string
   pageIndex: number
@@ -96,7 +333,7 @@ interface Props {
    *  fall through to Fabric / the canvas. Flipping this prop is
    *  instant because no remount / re-cluster happens.
    *
-   *  Part of the modeless-editing refactor.
+   *  Part of the modeless-editing refactor (docs/MODELESS.md Phase A).
    *  Previously the layer only mounted when tool === 'edit_text' and
    *  unmounted otherwise, which blew away cluster state on every tool
    *  switch AND prevented annotations on other layers from being seen
@@ -159,7 +396,12 @@ function readLinkedChains(tabId: string): LinkedChain[] {
   return state?._linkedChains ?? []
 }
 
-function writePendingEditsForPage(tabId: string, pageIndex: number, edits: ParagraphEdit[]) {
+function writePendingEditsForPage(
+  tabId: string,
+  pageIndex: number,
+  edits: ParagraphEdit[],
+  options: { markDirty?: boolean } = {},
+) {
   useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
     ...prev,
     pages: prev.pages.map((p) =>
@@ -172,10 +414,227 @@ function writePendingEditsForPage(tabId: string, pageIndex: number, edits: Parag
   const anyDirty = useFormatStore
     .getState()
     .data[tabId] != null
-  if (edits.length > 0) useTabStore.getState().setTabDirty(tabId, true)
+  if (edits.length > 0 && options.markDirty !== false) {
+    useTabStore.getState().setTabDirty(tabId, true)
+  }
   // If we just cleared the last edit, leave the dirty flag alone —
   // other edit systems (Fabric, page rotates) might still be dirty.
   void anyDirty
+}
+
+// Live reflow preview (Session 6 D1). Debounce keystroke-driven reflow
+// recomputation so typing doesn't run the obstacle/collision walk on
+// every input event (commitEdit already runs flowEditBlockedByObstacle
+// once per keystroke; this is the SECOND, neighbor-shift pass).
+const LIVE_PREVIEW_DEBOUNCE_MS = 160
+
+/** Equality on the live-preview neighbor-shift set: same paragraphs with
+ *  the same positionDelta. Lets the writer skip a no-op store update so a
+ *  static page doesn't churn renders on every debounce tick. */
+function liveEditsEqual(
+  a: ParagraphEdit[] | undefined,
+  b: ParagraphEdit[],
+): boolean {
+  const aa = a ?? []
+  if (aa.length !== b.length) return false
+  const byId = new Map(aa.map((e) => [e.paragraphId, e]))
+  for (const e of b) {
+    const prev = byId.get(e.paragraphId)
+    if (!prev) return false
+    const pd = prev.positionDelta ?? { dx: 0, dy: 0 }
+    const nd = e.positionDelta ?? { dx: 0, dy: 0 }
+    if (Math.abs(pd.dx - nd.dx) > 0.01 || Math.abs(pd.dy - nd.dy) > 0.01) return false
+  }
+  return true
+}
+
+/** Write the live reflow-preview neighbor shifts for a page. NOT a
+ *  document edit: it never marks the tab dirty, is wrapped in withReplay,
+ *  and is excluded from undo snapshots (historyStore cloneValue skip-list)
+ *  + from the save bytes (the save commit strips it). Equality-guarded so
+ *  a no-op recompute doesn't trigger a render. */
+function writeLivePreviewEditsForPage(
+  tabId: string,
+  pageIndex: number,
+  edits: ParagraphEdit[],
+) {
+  const state = useFormatStore.getState().data[tabId] as PdfFormatState | undefined
+  const page = state?.pages.find((p) => p.pageIndex === pageIndex) as
+    | (PdfFormatState['pages'][number] & { _livePreviewParagraphEdits?: ParagraphEdit[] })
+    | undefined
+  if (liveEditsEqual(page?._livePreviewParagraphEdits, edits)) return
+  withReplay(() => {
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({
+      ...prev,
+      pages: prev.pages.map((p) =>
+        p.pageIndex === pageIndex
+          ? ({
+              ...p,
+              _livePreviewParagraphEdits: edits.length > 0 ? edits : undefined,
+            } as PdfFormatState['pages'][number])
+          : p,
+      ),
+    }))
+  })
+}
+
+const DEFAULT_PARAGRAPH_LINE_HEIGHT = 1.2
+const ADD_TEXT_BOX_DEFAULT_WIDTH = 220
+
+type EditableParagraphBox = ParagraphBox & {
+  isNewTextBox?: boolean
+}
+
+interface ParagraphCommitOptions {
+  clipToBbox?: boolean
+  /** Styled character runs read from the live editor. When the key is
+   *  present, it replaces the edit's runs (undefined clears them, e.g. the
+   *  user deleted all styled text); when absent, prior runs are preserved. */
+  runs?: StyledRun[]
+}
+
+function normalizeHexColor(hex: string | undefined): string {
+  if (!hex) return ''
+  const trimmed = hex.trim().toLowerCase()
+  if (/^#[0-9a-f]{3}$/.test(trimmed)) {
+    return `#${trimmed[1]}${trimmed[1]}${trimmed[2]}${trimmed[2]}${trimmed[3]}${trimmed[3]}`
+  }
+  return trimmed
+}
+
+function sameParagraphBbox(a: ParagraphBox['bbox'] | undefined, b: ParagraphBox['bbox']): boolean {
+  if (!a) return true
+  return (
+    Math.abs(a.x - b.x) < 0.01 &&
+    Math.abs(a.y - b.y) < 0.01 &&
+    Math.abs(a.width - b.width) < 0.01 &&
+    Math.abs(a.height - b.height) < 0.01
+  )
+}
+
+function paragraphEditChangesStyleOrLayout(para: ParagraphBox, edit: ParagraphEdit): boolean {
+  const lineHeight = (edit as { lineHeight?: number }).lineHeight
+  return (
+    // Per-run styling lives in `runs`, not the flat fields, so the flat
+    // diff below would miss it and drop a "bold just this word" edit.
+    editCarriesRunStyling(edit) ||
+    !sameParagraphBbox(edit.bbox, para.bbox) ||
+    Math.abs((edit.fontSize ?? para.fontSize) - para.fontSize) >= 0.01 ||
+    normalizeHexColor(edit.color) !== normalizeHexColor(para.color) ||
+    normalizedFontFamily(edit.fontFamily ?? para.fontFamily ?? '') !==
+      normalizedFontFamily(para.fontFamily ?? '') ||
+    Boolean(edit.bold) !== Boolean(para.bold) ||
+    Boolean(edit.italic) !== Boolean(para.italic) ||
+    Boolean(edit.underline) ||
+    Boolean(edit.strikethrough) ||
+    (edit.align !== undefined && edit.align !== 'left') ||
+    (lineHeight !== undefined && Math.abs(lineHeight - DEFAULT_PARAGRAPH_LINE_HEIGHT) >= 0.01)
+  )
+}
+
+function paragraphEditHasMeaningfulChange(
+  para: ParagraphBox,
+  edit: ParagraphEdit,
+  styleChanged = paragraphEditChangesStyleOrLayout(para, edit),
+): boolean {
+  const moved =
+    edit.positionDelta !== undefined &&
+    (Math.abs(edit.positionDelta.dx) >= 0.01 || Math.abs(edit.positionDelta.dy) >= 0.01)
+  return edit.newText !== para.originalText || moved || styleChanged
+}
+
+function isNewTextBoxEdit(edit: ParagraphEdit): boolean {
+  return (edit as ParagraphEdit & { isNewTextBox?: boolean }).isNewTextBox === true
+}
+
+function syntheticParagraphFromEdit(edit: ParagraphEdit): EditableParagraphBox {
+  return {
+    id: edit.paragraphId,
+    itemIndices: [],
+    lines: [{
+      y: edit.bbox.y,
+      fontSize: edit.fontSize,
+      text: edit.newText,
+      itemIndices: [],
+      x: edit.bbox.x,
+      width: edit.bbox.width,
+    }],
+    bbox: edit.bbox,
+    originalText: '',
+    fontSize: edit.fontSize,
+    fontName: edit.fontFamily ?? 'Helvetica',
+    fontFamily: edit.fontFamily ?? 'Helvetica',
+    italic: edit.italic ?? false,
+    bold: edit.bold ?? false,
+    color: edit.color ?? '#000000',
+    onDarkBackground: false,
+    backgroundColor: edit.backgroundColor ?? 'transparent',
+    ...(edit.runs ? { runs: edit.runs } : {}),
+    isNewTextBox: true,
+  }
+}
+
+type EnginePreviewRegion = {
+  bbox: ParagraphBox['bbox']
+  backgroundColor?: string
+  preferSolidMask?: boolean
+}
+
+type OverlapSourceRedrawRegion = {
+  bbox: ParagraphBox['bbox']
+  backgroundColor?: string
+  redrawParagraphs: ParagraphBox[]
+}
+
+function expandPreviewMaskBbox(
+  bbox: ParagraphBox['bbox'],
+  pageSize: { w: number; h: number },
+  pad = 4,
+): ParagraphBox['bbox'] {
+  const x0 = Math.max(0, bbox.x - pad)
+  const y0 = Math.max(0, bbox.y - pad)
+  const x1 = Math.min(pageSize.w, bbox.x + bbox.width + pad)
+  const y1 = Math.min(pageSize.h, bbox.y + bbox.height + pad)
+  return {
+    x: x0,
+    y: y0,
+    width: Math.max(0, x1 - x0),
+    height: Math.max(0, y1 - y0),
+  }
+}
+
+function previewMaskBboxForStyle(
+  bbox: ParagraphBox['bbox'],
+  pageSize: { w: number; h: number },
+  style: Pick<ParagraphEdit, 'underline' | 'strikethrough' | 'runs'>,
+  fontSize: number,
+): ParagraphBox['bbox'] {
+  const decorated = paragraphStyleHasDecoration(style)
+    ? expandParagraphBboxForDecorationMask(bbox, fontSize, pageSize)
+    : bbox
+  return expandPreviewMaskBbox(decorated, pageSize)
+}
+
+function paragraphBboxesOverlap(
+  a: ParagraphBox['bbox'],
+  b: ParagraphBox['bbox'],
+  tolerance = 0.5,
+): boolean {
+  const left = Math.max(a.x, b.x)
+  const top = Math.max(a.y, b.y)
+  const right = Math.min(a.x + a.width, b.x + b.width)
+  const bottom = Math.min(a.y + a.height, b.y + b.height)
+  return right - left > tolerance && bottom - top > tolerance
+}
+
+function hasOverlappingNeighbor(
+  bbox: ParagraphBox['bbox'],
+  paragraphId: string,
+  paragraphs: ParagraphBox[],
+): boolean {
+  return paragraphs.some((p) =>
+    p.id !== paragraphId && paragraphBboxesOverlap(bbox, p.bbox),
+  )
 }
 
 export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width, height, active = true, renderReady = true }: Props) {
@@ -187,6 +646,8 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   const itemsRef = useRef<TextItem[]>([])
   const [basePageSize, setBasePageSize] = useState<{ w: number; h: number } | null>(null)
   const [activeId, setActiveId] = useState<string | null>(null)
+  const lastActiveIdRef = useRef<string | null>(null)
+  const [frontParagraphStack, setFrontParagraphStack] = useState<string[]>([])
   const [ocrRunning, setOcrRunning] = useState(false)
   const [ocrError, setOcrError] = useState<string | null>(null)
   const [clusterDone, setClusterDone] = useState(false)
@@ -202,15 +663,56 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   //   LinkedChain entry on the format-store.
   const [movePickerOpen, setMovePickerOpen] = useState(false)
   const [linkingMode, setLinkingMode] = useState(false)
-  const [movePreviewBbox, setMovePreviewBbox] = useState<ParagraphBox['bbox'] | null>(null)
+  const [movePreviewRegion, setMovePreviewRegion] = useState<EnginePreviewRegion | null>(null)
+  const suppressNextLayerClickUntilRef = useRef(0)
   // In-progress chain frames. Built up as the user clicks paragraphs
   // while linkingMode is on. End chain writes them to _linkedChains;
   // Cancel discards them. Supports any number of frames (N ≥ 2).
   const [linkingFrames, setLinkingFrames] = useState<LinkedFrame[]>([])
+
+  const bringParagraphToFront = useCallback((id: string) => {
+    setFrontParagraphStack((prev) => [...prev.filter((x) => x !== id), id])
+  }, [])
+
+  const suppressNextLayerClickAfterDrag = useCallback(() => {
+    suppressNextLayerClickUntilRef.current = Date.now() + 700
+  }, [])
+
+  useEffect(() => {
+    if (paragraphs.length === 0) {
+      setFrontParagraphStack((prev) => (prev.length === 0 ? prev : []))
+      return
+    }
+    const liveIds = new Set(paragraphs.map((p) => p.id))
+    setFrontParagraphStack((prev) => {
+      const next = prev.filter((id) => liveIds.has(id))
+      return next.length === prev.length ? prev : next
+    })
+  }, [paragraphs])
   const layerRef = useRef<HTMLDivElement>(null)
   // Format state for page count + tab-level access (for movePicker).
   const formatState = useFormatStore((s) => s.data[tabId] as PdfFormatState | undefined)
   const totalPageCount = formatState?.pageCount ?? 0
+  const tool = useUIStore((s) => s.tool)
+  const textOptions = useUIStore((s) => s.textOptions)
+  const setTextOptions = useUIStore((s) => s.setTextOptions)
+  const setTool = useUIStore((s) => s.setTool)
+  const autoLayoutTextEdits = useUIStore((s) => s.autoLayoutTextEdits)
+
+  // Expose cluster state to the test-hook driver. Each page keeps its
+  // own entry keyed by pageIndex so tests can look up a paragraph's
+  // full ParagraphBox (bbox, fontSize, color, fontFamily, bold, italic)
+  // without scraping DOM styles. No-op outside test runs (the test-hook
+  // bridge is the only consumer of window.__testParagraphs).
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const w = window as any
+    if (!w.__testParagraphs) w.__testParagraphs = {}
+    w.__testParagraphs[`${tabId}:${pageIndex}`] = paragraphs
+    return () => {
+      if (w.__testParagraphs) delete w.__testParagraphs[`${tabId}:${pageIndex}`]
+    }
+  }, [tabId, pageIndex, paragraphs])
 
   // When the layer goes inactive (tool flipped away from Edit Text) we
   // clear the per-paragraph active focus. Without this, reactivating
@@ -257,6 +759,21 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       document.removeEventListener('pointerdown', onOutside, true)
       document.removeEventListener('click', onOutside, true)
     }
+  }, [active])
+
+  useEffect(() => {
+    if (!active) return
+    const onClickCapture = (e: MouseEvent) => {
+      if (Date.now() > suppressNextLayerClickUntilRef.current) return
+      const el = layerRef.current
+      const target = e.target as Node | null
+      if (!el || !target || !el.contains(target)) return
+      e.preventDefault()
+      e.stopPropagation()
+      suppressNextLayerClickUntilRef.current = 0
+    }
+    document.addEventListener('click', onClickCapture, true)
+    return () => document.removeEventListener('click', onClickCapture, true)
   }, [active])
 
   // Cluster paragraphs once per (pdfDoc, pageIndex). Re-runs if pdfBytes
@@ -335,6 +852,24 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
             })
           } catch (err) {
             console.warn('[EditableParagraphLayer] text-color extract failed:', err)
+          }
+          try {
+            const runMap = await getParagraphStyledRunsFromStream(
+              pdfBytes,
+              pageIndex,
+              finalParagraphs,
+              res.pageHeight,
+              res.items,
+            )
+            if (cancelled) return
+            if (runMap.size > 0) {
+              finalParagraphs = finalParagraphs.map((p) => {
+                const runs = runMap.get(p.id)
+                return runs ? { ...p, runs } : p
+              })
+            }
+          } catch (err) {
+            console.warn('[EditableParagraphLayer] text-run decoration extract failed:', err)
           }
         }
 
@@ -440,6 +975,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       (e) => e.paragraphId === activeId,
     )
     const text = pending?.newText ?? para.originalText
+    const runs = pending?.runs ?? para.runs
     pushParagraphMove(tabId, pageIndex, {
       paragraphId: para.id,
       fromPage: pageIndex,
@@ -456,6 +992,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       italic: para.italic,
       color: para.color,
       backgroundColor: para.backgroundColor,
+      ...(runs ? { runs } : {}),
     })
     setActiveId(null)
     setMovePickerOpen(false)
@@ -561,6 +1098,27 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       | undefined
     return page?._savePreviewParagraphEdits
   })
+  // Live reflow preview (Session 6 D1): the synthesized neighbor shifts
+  // recomputed while typing, so neighbors move on INPUT — before blur/save.
+  const pageLivePreviewEdits = useFormatStore((s): ParagraphEdit[] | undefined => {
+    const state = s.data[tabId] as PdfFormatState | undefined
+    const page = state?.pages.find((p) => p.pageIndex === pageIndex) as
+      | (PdfFormatState['pages'][number] & { _livePreviewParagraphEdits?: ParagraphEdit[] })
+      | undefined
+    return page?._livePreviewParagraphEdits
+  })
+  const pageFabricJSON = useFormatStore((s): Record<string, unknown> | null => {
+    const state = s.data[tabId] as PdfFormatState | undefined
+    const page = state?.pages.find((p) => p.pageIndex === pageIndex)
+    return page?.fabricJSON ?? null
+  })
+  const renderParagraphs = useMemo<EditableParagraphBox[]>(() => {
+    const sourceIds = new Set(paragraphs.map((p) => p.id))
+    const synthetic = (pageEdits ?? [])
+      .filter((edit) => isNewTextBoxEdit(edit) && !sourceIds.has(edit.paragraphId))
+      .map(syntheticParagraphFromEdit)
+    return [...paragraphs, ...synthetic]
+  }, [paragraphs, pageEdits])
 
   useEffect(() => {
     if (!renderReady || !pageSavePreviewEdits || pageSavePreviewEdits.length === 0) return
@@ -577,13 +1135,103 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     })
   }, [renderReady, pageSavePreviewEdits, tabId, pageIndex])
 
-  const pendingById = useMemo(() => {
+  const dirtyById = useMemo(
+    () => new Map((pageEdits ?? []).map((e) => [e.paragraphId, e])),
+    [pageEdits],
+  )
+  const savedPreviewById = useMemo(() => {
     const edits: ParagraphEdit[] =
       pageEdits && pageEdits.length > 0
-        ? pageEdits
+        ? []
         : pageSavePreviewEdits ?? []
     return new Map(edits.map((e) => [e.paragraphId, e]))
   }, [pageEdits, pageSavePreviewEdits])
+  // Live preview only applies WHILE there are pending edits (the user is
+  // actively typing); after save, pageEdits clears and the save-preview
+  // channel takes over.
+  const livePreviewById = useMemo(() => {
+    const edits: ParagraphEdit[] =
+      pageEdits && pageEdits.length > 0 ? pageLivePreviewEdits ?? [] : []
+    return new Map(edits.map((e) => [e.paragraphId, e]))
+  }, [pageEdits, pageLivePreviewEdits])
+  // Order matters: live-preview neighbor shifts sit UNDER the user's own
+  // dirty edits, so a paragraph the user edited always renders from its
+  // real edit, never a synthesized shift.
+  const pendingById = useMemo(
+    () => new Map([...savedPreviewById, ...livePreviewById, ...dirtyById]),
+    [dirtyById, savedPreviewById, livePreviewById],
+  )
+
+  // ── Live reflow preview (Session 6 D1) ──────────────────────────
+  // While the user types, recompute the SAME single-page reflow the save
+  // path runs and feed the neighbor shifts into _livePreviewParagraphEdits
+  // so followers visibly move on INPUT — not just after blur/save. Gated
+  // by the exact obstacle/safety logic save uses: a flow edit only exists
+  // when autoLayout is on and the region is safe (commitEdit pins unsafe
+  // edits to 'fixed'), and computeReflowDeltasWithReport independently
+  // re-freezes unsafe edits + collision-checks obstacles, so unsafe
+  // regions produce zero neighbor shifts. Deps are pageEdits + paragraphs
+  // ONLY (never the live-preview field) to avoid a write→read→write loop.
+  const livePreviewTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    const clearTimer = () => {
+      if (livePreviewTimerRef.current !== null) {
+        window.clearTimeout(livePreviewTimerRef.current)
+        livePreviewTimerRef.current = null
+      }
+    }
+    if (!active || tool !== 'edit_text') {
+      clearTimer()
+      return
+    }
+    const dirty = pageEdits ?? []
+    clearTimer()
+    livePreviewTimerRef.current = window.setTimeout(() => {
+      livePreviewTimerRef.current = null
+      const dirtyIds = new Set(dirty.map((e) => e.paragraphId))
+      const hasFlowEdit = dirty.some(
+        (e) => e.flowBehavior === 'flow' && e.originalText !== '',
+      )
+      let preview: ParagraphEdit[] = []
+      if (hasFlowEdit) {
+        const { editsByPage } = computeReflowDeltasWithReport(
+          new Map([[pageIndex, toReflowParagraphs(paragraphs)]]),
+          // Shallow-clone so the reflow's internal mutation never touches
+          // the store's edit objects. Single-page: no cross-page spill in
+          // the live preview (save owns multi-page).
+          new Map([[pageIndex, dirty.map((e) => ({ ...e }))]]),
+          { crossPageSpill: false },
+        )
+        const out = editsByPage.get(pageIndex) ?? []
+        // Keep ONLY the synthesized neighbor shifts — paragraphs the user
+        // did not edit, that gained a positionDelta from reflow. The
+        // edited paragraphs render from dirtyById.
+        preview = out.filter(
+          (e) => !dirtyIds.has(e.paragraphId) && !!e.positionDelta,
+        )
+      }
+      writeLivePreviewEditsForPage(tabId, pageIndex, preview)
+    }, LIVE_PREVIEW_DEBOUNCE_MS)
+    return clearTimer
+  }, [active, tool, pageEdits, paragraphs, tabId, pageIndex])
+
+  useEffect(() => {
+    if (!active || tool !== 'edit_text' || !activeId) return
+    const para = renderParagraphs.find((p) => p.id === activeId)
+    if (!para) return
+    const pending = pendingById.get(activeId)
+    setTextOptions({
+      fontSize: pending?.fontSize ?? para.fontSize,
+      color: pending?.color ?? para.color,
+      fontFamily: pending?.fontFamily ?? para.fontFamily ?? 'Helvetica',
+      bold: pending?.bold ?? para.bold,
+      italic: pending?.italic ?? para.italic,
+      underline: pending?.underline ?? false,
+      strikethrough: pending?.strikethrough ?? false,
+      textAlign: pending?.align === 'justify' ? 'left' : pending?.align ?? 'left',
+      lineHeight: (pending as { lineHeight?: number } | undefined)?.lineHeight ?? 1.2,
+    })
+  }, [active, tool, activeId, renderParagraphs, pendingById, setTextOptions])
 
   // (itemsRef declared at top of component — populated by cluster effect.)
 
@@ -598,43 +1246,134 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   const prevActiveIdRef = useRef<string | null>(null)
 
   const commitEdit = useCallback(
-    (para: ParagraphBox, newText: string, overrideAlign?: TextAlign) => {
+    (
+      para: ParagraphBox,
+      newText: string,
+      overrideAlign?: TextAlign,
+      options?: ParagraphCommitOptions,
+    ) => {
       const existing = readPendingEditsForPage(tabId, pageIndex)
       const without = existing.filter((e) => e.paragraphId !== para.id)
       const prevEdit = existing.find((e) => e.paragraphId === para.id)
       const align = overrideAlign ?? prevEdit?.align
       const positionDelta = prevEdit?.positionDelta
-      // Preserve styleChanged across commitEdit rewrites. If the caller
-      // passed overrideAlign (contextual-toolbar align change), that IS
-      // a style change; flag it. Otherwise inherit from prevEdit.
-      const styleChanged = prevEdit?.styleChanged || overrideAlign !== undefined
-      const isNoop = newText === para.originalText && !align && !positionDelta && !styleChanged
+      const clipToBbox = options?.clipToBbox ?? prevEdit?.clipToBbox === true
+      // Styled runs: an explicit `runs` key (even undefined) from the editor
+      // replaces them; otherwise carry the prior runs forward through typing.
+      const runs = options && 'runs' in options ? options.runs : prevEdit?.runs
       const itemOriginalTexts = para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
+      const draft: ParagraphEdit = {
+        paragraphId: para.id,
+        // Preserve style/layout fields through subsequent typing. A
+        // previous version kept only the sticky styleChanged flag here,
+        // which could route plain text edits to overlay even after the
+        // actual style values had returned to the paragraph defaults.
+        bbox: prevEdit?.bbox ?? para.bbox,
+        ...(prevEdit?.maskBbox ? { maskBbox: prevEdit.maskBbox } : {}),
+        originalText: para.originalText,
+        newText,
+        fontSize: prevEdit?.fontSize ?? para.fontSize,
+        color: prevEdit?.color ?? para.color,
+        backgroundColor: prevEdit?.backgroundColor ?? para.backgroundColor,
+        fontFamily: prevEdit?.fontFamily ?? para.fontFamily,
+        bold: prevEdit?.bold ?? para.bold,
+        italic: prevEdit?.italic ?? para.italic,
+        underline: prevEdit?.underline ?? false,
+        strikethrough: prevEdit?.strikethrough ?? false,
+        align,
+        layoutRole: prevEdit?.layoutRole ?? para.layout?.role,
+        layoutSafeForAutoReflow:
+          prevEdit?.layoutSafeForAutoReflow ?? para.layout?.safeForAutoReflow,
+        layoutFlowId: prevEdit?.layoutFlowId ?? para.layout?.flowId,
+        layoutReasons: prevEdit?.layoutReasons ?? para.layout?.reasons,
+        // Session 5: detected alignment + R5b font-recovery state ride
+        // every edit so the save seam can preserve/record without a
+        // save-time recluster. BOTH are tri-state: undefined = unknown
+        // (detector had no evidence / recovery probe could not
+        // complete) and must survive to the seam — never collapse it
+        // into a positive claim (gate-2 P1).
+        layoutDetectedAlign:
+          prevEdit?.layoutDetectedAlign ?? para.layout?.align,
+        layoutWeakCenterEvidence:
+          prevEdit?.layoutWeakCenterEvidence ?? para.layout?.weakCenterEvidence,
+        fontFamilyIsGenericFallback:
+          prevEdit?.fontFamilyIsGenericFallback ??
+          para.fontFamilyIsGenericFallback,
+        itemIndices: [...para.itemIndices],
+        itemOriginalTexts,
+        positionDelta,
+        ...(clipToBbox ? { clipToBbox: true } : {}),
+        ...(prevEdit?.isNewTextBox ? { isNewTextBox: true } : {}),
+        ...(prevEdit?.skipSourceMask ? { skipSourceMask: true } : {}),
+        ...((prevEdit as { requiresOverlay?: boolean } | undefined)?.requiresOverlay
+          ? { requiresOverlay: true }
+          : {}),
+        ...((prevEdit as { lineHeight?: number } | undefined)?.lineHeight !== undefined
+          ? { lineHeight: (prevEdit as { lineHeight?: number }).lineHeight }
+          : {}),
+        ...(runs && runs.length > 0 ? { runs } : {}),
+      }
+      // Re-derive newText from runs + force overlay when the runs carry
+      // styling, so a "bold just this word" edit persists and renders.
+      let synced = syncRunsToEdit(draft)
+      if (editCarriesRunStyling(synced)) {
+        const grown = growParagraphBboxForStyledText(para, synced, basePageSize)
+        if (!sameParagraphBbox(grown, synced.bbox)) {
+          synced = {
+            ...synced,
+            bbox: grown,
+            ...(synced.maskBbox ? {} : { maskBbox: para.bbox }),
+          }
+        }
+      }
+      if (synced.clipToBbox && (autoLayoutTextEdits || synced.newText.includes('\n'))) {
+        const grown = growParagraphBboxForStyledText(para, synced, basePageSize)
+        if (!sameParagraphBbox(grown, synced.bbox)) {
+          synced = {
+            ...synced,
+            bbox: grown,
+            ...(synced.maskBbox ? {} : { maskBbox: para.bbox }),
+          }
+        }
+        delete synced.clipToBbox
+      }
+      const grewDown =
+        synced.bbox.y + synced.bbox.height > para.bbox.y + para.bbox.height + 0.01
+      if (
+        autoLayoutTextEdits &&
+        !synced.isNewTextBox &&
+        !synced.skipSourceMask &&
+        (synced.newText === '' || grewDown)
+      ) {
+        if (para.layout && !para.layout.safeForAutoReflow) {
+          synced.flowBehavior = 'fixed'
+          synced.layoutWarning = blockedAutoReflowMessage(para.layout)
+        } else {
+          const obstacle = flowEditBlockedByObstacle(
+            toReflowParagraphs(paragraphs),
+            synced,
+            pageIndex,
+          )
+          if (obstacle) {
+            synced.flowBehavior = 'fixed'
+            synced.layoutWarning = obstacleBlockedAutoReflowMessage(obstacle.reason)
+          } else {
+            synced.flowBehavior = 'flow'
+            delete synced.layoutWarning
+          }
+        }
+      }
+      synced = expandParagraphEditMaskForDecorations(synced, basePageSize, para.bbox)
+      const styleChanged = paragraphEditChangesStyleOrLayout(para, synced)
+      if (styleChanged) synced.styleChanged = true
+      else delete synced.styleChanged
+      const isNoop = !paragraphEditHasMeaningfulChange(para, synced, styleChanged)
       const next: ParagraphEdit[] = isNoop
         ? without
-        : [
-            ...without,
-            {
-              paragraphId: para.id,
-              bbox: para.bbox,
-              originalText: para.originalText,
-              newText,
-              fontSize: para.fontSize,
-              color: para.color,
-              backgroundColor: para.backgroundColor,
-              fontFamily: para.fontFamily,
-              bold: para.bold,
-              italic: para.italic,
-              align,
-              itemIndices: [...para.itemIndices],
-              itemOriginalTexts,
-              positionDelta,
-              styleChanged,
-            },
-          ]
+        : [...without, synced]
       writePendingEditsForPage(tabId, pageIndex, next)
     },
-    [tabId, pageIndex],
+    [tabId, pageIndex, basePageSize, autoLayoutTextEdits, paragraphs],
   )
 
   // Commit a new drag offset for this paragraph. Text, alignment, and
@@ -651,35 +1390,73 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       const newDelta = isZero ? undefined : delta
       const newText = prevEdit?.newText ?? para.originalText
       const align = prevEdit?.align
-      const isNoop = newText === para.originalText && !align && !newDelta
+      const runs = prevEdit?.runs ?? para.runs
       const itemOriginalTexts =
         prevEdit?.itemOriginalTexts ??
         para.itemIndices.map((idx) => itemsRef.current[idx]?.str ?? '')
+      const draft: ParagraphEdit = {
+        paragraphId: para.id,
+        bbox: prevEdit?.bbox ?? para.bbox,
+        ...(prevEdit?.maskBbox ? { maskBbox: prevEdit.maskBbox } : {}),
+        originalText: para.originalText,
+        newText,
+        fontSize: prevEdit?.fontSize ?? para.fontSize,
+        color: prevEdit?.color ?? para.color,
+        backgroundColor: prevEdit?.backgroundColor ?? para.backgroundColor,
+        fontFamily: prevEdit?.fontFamily ?? para.fontFamily,
+        bold: prevEdit?.bold ?? para.bold,
+        italic: prevEdit?.italic ?? para.italic,
+        underline: prevEdit?.underline ?? false,
+        strikethrough: prevEdit?.strikethrough ?? false,
+        align,
+        layoutRole: prevEdit?.layoutRole ?? para.layout?.role,
+        layoutSafeForAutoReflow:
+          prevEdit?.layoutSafeForAutoReflow ?? para.layout?.safeForAutoReflow,
+        layoutFlowId: prevEdit?.layoutFlowId ?? para.layout?.flowId,
+        layoutReasons: prevEdit?.layoutReasons ?? para.layout?.reasons,
+        layoutDetectedAlign:
+          prevEdit?.layoutDetectedAlign ?? para.layout?.align,
+        layoutWeakCenterEvidence:
+          prevEdit?.layoutWeakCenterEvidence ?? para.layout?.weakCenterEvidence,
+        fontFamilyIsGenericFallback:
+          prevEdit?.fontFamilyIsGenericFallback ??
+          para.fontFamilyIsGenericFallback,
+        itemIndices: [...para.itemIndices],
+        itemOriginalTexts,
+        positionDelta: newDelta,
+        ...(prevEdit?.clipToBbox ? { clipToBbox: true } : {}),
+        ...(prevEdit?.isNewTextBox ? { isNewTextBox: true } : {}),
+        ...(prevEdit?.skipSourceMask ? { skipSourceMask: true } : {}),
+        ...((prevEdit as { requiresOverlay?: boolean } | undefined)?.requiresOverlay
+          ? { requiresOverlay: true }
+          : {}),
+        ...((prevEdit as { lineHeight?: number } | undefined)?.lineHeight !== undefined
+          ? { lineHeight: (prevEdit as { lineHeight?: number }).lineHeight }
+          : {}),
+        ...(runs ? { runs } : {}),
+      }
+      let synced = syncRunsToEdit(draft)
+      if (editCarriesRunStyling(synced)) {
+        const grown = growParagraphBboxForStyledText(para, synced, basePageSize)
+        if (!sameParagraphBbox(grown, synced.bbox)) {
+          synced = {
+            ...synced,
+            bbox: grown,
+            ...(synced.maskBbox ? {} : { maskBbox: para.bbox }),
+          }
+        }
+      }
+      synced = expandParagraphEditMaskForDecorations(synced, basePageSize, para.bbox)
+      const styleChanged = paragraphEditChangesStyleOrLayout(para, synced)
+      if (styleChanged) synced.styleChanged = true
+      else delete synced.styleChanged
+      const isNoop = !paragraphEditHasMeaningfulChange(para, synced, styleChanged)
       const next: ParagraphEdit[] = isNoop
         ? without
-        : [
-            ...without,
-            {
-              paragraphId: para.id,
-              bbox: para.bbox,
-              originalText: para.originalText,
-              newText,
-              fontSize: para.fontSize,
-              color: para.color,
-              backgroundColor: para.backgroundColor,
-              fontFamily: para.fontFamily,
-              bold: para.bold,
-              italic: para.italic,
-              align,
-              itemIndices: [...para.itemIndices],
-              itemOriginalTexts,
-              positionDelta: newDelta,
-              styleChanged: prevEdit?.styleChanged,
-            },
-          ]
+        : [...without, synced]
       writePendingEditsForPage(tabId, pageIndex, next)
     },
-    [tabId, pageIndex],
+    [tabId, pageIndex, basePageSize],
   )
 
   const beginEditSession = useCallback(() => {
@@ -701,6 +1478,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   // user clicks from one paragraph directly to another — activeId
   // transitions A → null only briefly, or A → B with just one push).
   useEffect(() => {
+    if (activeId) lastActiveIdRef.current = activeId
     const prev = prevActiveIdRef.current
     if (prev !== null && activeId !== prev) {
       // Leaving a previously-active paragraph — flush.
@@ -745,6 +1523,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
         // would silently revert the bbox to the original cluster
         // dimensions. patch.bbox below still wins for fresh resizes.
         bbox: prev?.bbox ?? para.bbox,
+        ...(prev?.maskBbox ? { maskBbox: prev.maskBbox } : {}),
         originalText: para.originalText,
         newText: prev?.newText ?? para.originalText,
         fontSize: prev?.fontSize ?? para.fontSize,
@@ -752,62 +1531,327 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
         backgroundColor: prev?.backgroundColor ?? para.backgroundColor,
         bold: prev?.bold ?? para.bold,
         italic: prev?.italic ?? para.italic,
+        underline: prev?.underline ?? false,
+        strikethrough: prev?.strikethrough ?? false,
         fontFamily: prev?.fontFamily ?? para.fontFamily,
         align: prev?.align,
+        layoutRole: prev?.layoutRole ?? para.layout?.role,
+        layoutSafeForAutoReflow:
+          prev?.layoutSafeForAutoReflow ?? para.layout?.safeForAutoReflow,
+        layoutFlowId: prev?.layoutFlowId ?? para.layout?.flowId,
+        layoutReasons: prev?.layoutReasons ?? para.layout?.reasons,
+        layoutDetectedAlign:
+          prev?.layoutDetectedAlign ?? para.layout?.align,
+        layoutWeakCenterEvidence:
+          prev?.layoutWeakCenterEvidence ?? para.layout?.weakCenterEvidence,
+        fontFamilyIsGenericFallback:
+          prev?.fontFamilyIsGenericFallback ??
+          para.fontFamilyIsGenericFallback,
         itemIndices: [...para.itemIndices],
         itemOriginalTexts,
         positionDelta: prev?.positionDelta,
+        ...(prev?.clipToBbox ? { clipToBbox: true } : {}),
+        ...(prev?.isNewTextBox ? { isNewTextBox: true } : {}),
+        ...(prev?.skipSourceMask ? { skipSourceMask: true } : {}),
+        ...((prev as { requiresOverlay?: boolean } | undefined)?.requiresOverlay
+          ? { requiresOverlay: true }
+          : {}),
+        // Preserve per-run styling through whole-box patches; `patch` may
+        // still override (e.g. runs:undefined to clear).
+        ...(prev?.runs ? { runs: prev.runs } : {}),
         ...patch,
       }
-      const next = [...without, merged]
+      if (patch.bbox && !sameParagraphBbox(patch.bbox, para.bbox)) {
+        merged.maskBbox = prev?.maskBbox ?? para.bbox
+      }
+      if (paragraphStylePatchNeedsAutoGrow(patch)) {
+        const grown = growParagraphBboxForStyledText(para, merged, basePageSize)
+        if (!sameParagraphBbox(grown, para.bbox)) {
+          merged.maskBbox = prev?.maskBbox ?? para.bbox
+        }
+        merged.bbox = grown
+      }
+      const grewDown =
+        merged.bbox.y + merged.bbox.height > para.bbox.y + para.bbox.height + 0.01
+      if (
+        autoLayoutTextEdits &&
+        !merged.isNewTextBox &&
+        !merged.skipSourceMask &&
+        (merged.newText === '' || grewDown)
+      ) {
+        if (para.layout && !para.layout.safeForAutoReflow) {
+          merged.flowBehavior = 'fixed'
+          merged.layoutWarning = blockedAutoReflowMessage(para.layout)
+        } else {
+          const obstacle = flowEditBlockedByObstacle(
+            toReflowParagraphs(paragraphs),
+            merged,
+            pageIndex,
+          )
+          if (obstacle) {
+            merged.flowBehavior = 'fixed'
+            merged.layoutWarning = obstacleBlockedAutoReflowMessage(obstacle.reason)
+          } else {
+            merged.flowBehavior = 'flow'
+            delete merged.layoutWarning
+          }
+        }
+      }
+      const normalized = expandParagraphEditMaskForDecorations(merged, basePageSize, para.bbox)
+      const styleChanged = paragraphEditChangesStyleOrLayout(para, merged)
+      if (styleChanged) normalized.styleChanged = true
+      else delete normalized.styleChanged
+      const next = paragraphEditHasMeaningfulChange(para, normalized, styleChanged)
+        ? [...without, normalized]
+        : without
       writePendingEditsForPage(tabId, pageIndex, next)
     },
-    [tabId, pageIndex],
-  )
-
-  const setParagraphFontSize = useCallback(
-    (para: ParagraphBox, fontSize: number) => {
-      // styleChanged forces the save pipeline to overlay-bake, which
-      // re-emits Tf so the new size sticks; the rewrite path only
-      // touches Tj operands and would silently drop font-size changes.
-      updateFieldOnEdit(para, { fontSize, styleChanged: true })
-    },
-    [updateFieldOnEdit],
-  )
-
-  const setParagraphColor = useCallback(
-    (para: ParagraphBox, color: string) => {
-      updateFieldOnEdit(para, { color, styleChanged: true })
-    },
-    [updateFieldOnEdit],
+    [tabId, pageIndex, basePageSize, autoLayoutTextEdits, paragraphs],
   )
 
   const setParagraphFontFamily = useCallback(
     (para: ParagraphBox, fontFamily: string) => {
-      // Forces overlay-bake (engine can't rewrite a Tj's font reference
-      // in place — needs a fresh Tf in the appended overlay stream).
+      // Requires overlay-bake: changing font resources needs a fresh Tf
+      // that may not exist in the original page resource dictionary.
       // Engine's overlay-bake supports the Standard 14 families today
       // (G2 still open for arbitrary custom fonts) — the toolbar's
       // dropdown only offers fonts the engine can honor.
-      updateFieldOnEdit(para, { fontFamily, styleChanged: true })
+      updateFieldOnEdit(para, { fontFamily, styleChanged: true, requiresOverlay: true })
     },
     [updateFieldOnEdit],
   )
 
   const setParagraphLineHeight = useCallback(
     (para: ParagraphBox, lineHeight: number) => {
-      // Line-spacing changes go through the overlay-bake path because
-      // they affect leading/TL emission across multi-line paragraphs.
-      updateFieldOnEdit(para, { lineHeight, styleChanged: true })
+      updateFieldOnEdit(para, { lineHeight, styleChanged: true, requiresOverlay: true })
     },
     [updateFieldOnEdit],
   )
 
+  // Last non-collapsed selection made inside a paragraph editor. A ribbon
+  // click moves focus off the editor and collapses the live selection, so we
+  // restore this range before applying per-selection formatting.
+  const savedSelectionRef = useRef<{ paragraphId: string; range: Range } | null>(null)
+  useEffect(() => {
+    const onSel = () => {
+      const sel = window.getSelection()
+      if (!sel || sel.rangeCount === 0) return
+      const range = sel.getRangeAt(0)
+      if (range.collapsed) return
+      const node = range.commonAncestorContainer
+      const host = (node.nodeType === 1 ? (node as Element) : node.parentElement)
+        ?.closest('[data-testid="paragraph-editor"]') as HTMLElement | null
+      const pid = host?.getAttribute('data-paragraph-id')
+      if (pid) savedSelectionRef.current = { paragraphId: pid, range: range.cloneRange() }
+    }
+    document.addEventListener('selectionchange', onSel)
+    return () => document.removeEventListener('selectionchange', onSel)
+  }, [])
+
+  // Apply a character-level style. When there's a live (or just-made) text
+  // selection inside the paragraph's editor, only that selection changes
+  // (Acrobat-style per-run formatting); otherwise it falls back to a
+  // whole-box style edit (the previous behavior).
+  const applyCharStyle = useCallback(
+    (
+      para: ParagraphBox,
+      attr: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'color' | 'fontSize',
+      value: boolean | string | number,
+    ) => {
+      const el = document.querySelector(
+        `[data-paragraph-id="${CSS.escape(para.id)}"]`,
+      ) as HTMLElement | null
+      // Prefer a live in-editor selection; only restore the saved range when
+      // focus moved to a toolbar and collapsed the live selection. (This also
+      // lets automation set a selection then trigger formatting.)
+      const live = window.getSelection()
+      const liveUsable = !!(
+        el && live && live.rangeCount > 0 &&
+        !live.getRangeAt(0).collapsed &&
+        el.contains(live.getRangeAt(0).commonAncestorContainer)
+      )
+      const saved = savedSelectionRef.current
+      if (!liveUsable && el && saved && saved.paragraphId === para.id && live) {
+        try {
+          el.focus()
+          live.removeAllRanges()
+          live.addRange(saved.range)
+        } catch { /* stale range — fall through to whole-box */ }
+      }
+      const applied = el ? formatSelection(el, attr, value, scale) : false
+      if (applied && el) {
+        const rawRuns = readStyledRuns(el, scale)
+        const runs = editCarriesRunStyling({ runs: rawRuns } as ParagraphEdit) ? rawRuns : undefined
+        const newText = readMultilineText(el)
+        commitEdit(para, newText, undefined, { runs, clipToBbox: elementHasOverflow(el) })
+        const sel = window.getSelection()
+        if (sel && sel.rangeCount > 0 && !sel.getRangeAt(0).collapsed) {
+          savedSelectionRef.current = { paragraphId: para.id, range: sel.getRangeAt(0).cloneRange() }
+        }
+        return
+      }
+      // No usable selection → whole-box style edit.
+      const patch: Partial<ParagraphEdit> = { styleChanged: true }
+      if (attr === 'color') patch.color = String(value)
+      else if (attr === 'fontSize') patch.fontSize = Number(value)
+      else {
+        ;(patch as Record<string, unknown>)[attr] = !!value
+        patch.requiresOverlay = true
+      }
+      updateFieldOnEdit(para, patch)
+    },
+    [scale, commitEdit, updateFieldOnEdit],
+  )
+
+  useEffect(() => {
+    const onParagraphStyle = (event: Event) => {
+      const detail = (event as CustomEvent<Partial<ParagraphEdit>>).detail
+      if (!detail || typeof detail !== 'object') return
+      const toolbarInteractionAt =
+        (window as Window & { __openSatchelTextToolbarPointerAt?: number })
+          .__openSatchelTextToolbarPointerAt ?? 0
+      const targetId =
+        activeId ??
+        (Date.now() - toolbarInteractionAt < 1200 ? lastActiveIdRef.current : null)
+      if (!targetId) return
+      const para = renderParagraphs.find((p) => p.id === targetId)
+      if (!para) return
+      // Character attributes target just the selection when one exists
+      // (Acrobat-style); applyCharStyle falls back to a whole-box edit when
+      // nothing is selected. Box-level attributes (family, alignment,
+      // line-spacing) always apply to the whole paragraph.
+      let handledChar = false
+      const charApply = (
+        attr: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'color' | 'fontSize',
+        value: boolean | string | number,
+      ) => {
+        handledChar = true
+        applyCharStyle(para, attr, value)
+      }
+      if (typeof detail.fontSize === 'number') charApply('fontSize', detail.fontSize)
+      if (typeof detail.color === 'string') charApply('color', detail.color)
+      if (typeof detail.bold === 'boolean') charApply('bold', detail.bold)
+      if (typeof detail.italic === 'boolean') charApply('italic', detail.italic)
+      if (typeof detail.underline === 'boolean') charApply('underline', detail.underline)
+      if (typeof detail.strikethrough === 'boolean') charApply('strikethrough', detail.strikethrough)
+
+      const patch: Partial<ParagraphEdit> = {}
+      if (typeof detail.fontFamily === 'string') {
+        patch.fontFamily = detail.fontFamily
+        patch.requiresOverlay = true
+      }
+      if ('customFontId' in detail) {
+        patch.customFontId =
+          typeof detail.customFontId === 'string' ? detail.customFontId : undefined
+        patch.requiresOverlay = true
+      }
+      if (typeof detail.align === 'string') patch.align = detail.align
+      if (typeof (detail as { lineHeight?: unknown }).lineHeight === 'number') {
+        patch.lineHeight = (detail as { lineHeight: number }).lineHeight
+        patch.requiresOverlay = true
+      }
+      if (Object.keys(patch).length > 0) updateFieldOnEdit(para, { ...patch, styleChanged: true })
+      else if (!handledChar) return
+      bringParagraphToFront(para.id)
+      setActiveId(para.id)
+      requestAnimationFrame(() => {
+        const el = document.querySelector(
+          `[data-paragraph-id="${CSS.escape(para.id)}"]`,
+        ) as HTMLElement | null
+        el?.focus()
+      })
+    }
+    window.addEventListener(PARAGRAPH_STYLE_EVENT, onParagraphStyle as EventListener)
+    return () => {
+      window.removeEventListener(PARAGRAPH_STYLE_EVENT, onParagraphStyle as EventListener)
+    }
+  }, [activeId, bringParagraphToFront, renderParagraphs, updateFieldOnEdit])
+
+  const placeNewTextBox = useCallback((
+    e: { target: EventTarget | null; currentTarget: HTMLDivElement; clientX: number; clientY: number },
+  ) => {
+    if (!active || tool !== 'text') return
+    if (e.target !== e.currentTarget) return
+    const rect = e.currentTarget.getBoundingClientRect()
+    const pageW = basePageSize?.w ?? (width / Math.max(scale, 0.0001))
+    const pageH = basePageSize?.h ?? (height / Math.max(scale, 0.0001))
+    const rawX = (e.clientX - rect.left) / Math.max(scale, 0.0001)
+    const rawY = (e.clientY - rect.top) / Math.max(scale, 0.0001)
+    const fontSize = Math.max(1, textOptions.fontSize ?? 16)
+    const lineHeight = Math.max(0.5, textOptions.lineHeight ?? DEFAULT_PARAGRAPH_LINE_HEIGHT)
+    const boxWidth = Math.max(80, Math.min(ADD_TEXT_BOX_DEFAULT_WIDTH, pageW - rawX))
+    const boxHeight = Math.max(fontSize * lineHeight, fontSize + 4)
+    const x = Math.max(0, Math.min(rawX, Math.max(0, pageW - boxWidth)))
+    const y = Math.max(0, Math.min(rawY, Math.max(0, pageH - boxHeight)))
+    const id = `add_${pageIndex}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`
+    const edit: ParagraphEdit = {
+      paragraphId: id,
+      bbox: { x, y, width: boxWidth, height: boxHeight },
+      maskBbox: { x, y, width: 0, height: 0 },
+      originalText: '',
+      newText: '',
+      fontSize,
+      color: textOptions.color ?? '#000000',
+      backgroundColor: 'transparent',
+      fontFamily: textOptions.fontFamily ?? 'Helvetica',
+      bold: textOptions.bold ?? false,
+      italic: textOptions.italic ?? false,
+      underline: textOptions.underline ?? false,
+      strikethrough: textOptions.strikethrough ?? false,
+      align: textOptions.textAlign ?? 'left',
+      lineHeight,
+      itemIndices: [],
+      itemOriginalTexts: [],
+      isNewTextBox: true,
+      skipSourceMask: true,
+      requiresOverlay: true,
+    }
+    const existing = readPendingEditsForPage(tabId, pageIndex)
+    writePendingEditsForPage(tabId, pageIndex, [...existing, edit], { markDirty: false })
+    bringParagraphToFront(id)
+    setActiveId(id)
+    setTool('edit_text')
+    requestAnimationFrame(() => {
+      const el = document.querySelector(
+        `[data-paragraph-id="${CSS.escape(id)}"]`,
+      ) as HTMLElement | null
+      el?.focus()
+    })
+  }, [
+    active,
+    tool,
+    basePageSize,
+    width,
+    height,
+    scale,
+    textOptions,
+    pageIndex,
+    tabId,
+    bringParagraphToFront,
+    setTool,
+  ])
+
+  const markParagraphForRedaction = useCallback(
+    (para: ParagraphBox, displayBbox: ParagraphBox['bbox'], delta: { dx: number; dy: number }) => {
+      stageElementRedactionMark({
+        tabId,
+        pageIndex,
+        targetId: redactionMarkTargetId('paragraph', pageIndex, para.id),
+        rect: {
+          left: (displayBbox.x + delta.dx) * scale,
+          top: (displayBbox.y + delta.dy) * scale,
+          width: displayBbox.width * scale,
+          height: displayBbox.height * scale,
+        },
+        pageWidth: width,
+        pageHeight: height,
+      })
+    },
+    [tabId, pageIndex, scale, width, height],
+  )
+
   /** Commit a resize. Constrained to grow-only (newBbox.width/height
-   *  >= original) so the bake-stage whiteout doesn't underexpose
-   *  original glyphs that fall outside a shrunk bbox. styleChanged
-   *  forces overlay-bake which honors the new bbox via the existing
-   *  bbox-driven whiteout + drawText path. */
+   *  >= original) so saved text never gets an undersized live-edit box. */
   const commitResize = useCallback(
     (para: ParagraphBox, newBbox: ParagraphBox['bbox']) => {
       const safe = {
@@ -858,10 +1902,20 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
 
   const engineSkipBboxes = useMemo(() => {
     if (!basePageSize) return []
-    const pending = pageEdits ?? []
-    const bboxes: ReturnType<typeof skipBboxFromParagraphBbox>[] = pending.map(
-      (edit) => skipBboxFromParagraphBbox(edit.bbox, basePageSize.h),
-    )
+    const pending = (pageEdits ?? []).filter((edit) => !edit.skipSourceMask)
+    const shouldSkipMoveSourceMask = (edit: ParagraphEdit): boolean => {
+      const delta = edit.positionDelta
+      if (!delta || (Math.abs(delta.dx) < 0.01 && Math.abs(delta.dy) < 0.01)) {
+        return false
+      }
+      return hasOverlappingNeighbor(edit.maskBbox ?? edit.bbox, edit.paragraphId, renderParagraphs)
+    }
+    const bboxes: ReturnType<typeof skipBboxFromParagraphBbox>[] = pending
+      .filter((edit) => !shouldSkipMoveSourceMask(edit))
+      .map((edit) => skipBboxFromParagraphBbox(
+        expandPreviewMaskBbox(edit.maskBbox ?? edit.bbox, basePageSize),
+        basePageSize.h,
+      ))
     // Also include the currently-active paragraph so the engine renders
     // the stripped background BEFORE the first keystroke — removes the
     // "white rect then correction" phase the user feels at edit-start.
@@ -870,40 +1924,121 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     // emitting the same bbox twice (which would make the engine emit
     // the same object.gen twice and waste a re-render).
     if (activeId) {
-      const activePara = paragraphs.find((p) => p.id === activeId)
+      const activePara = renderParagraphs.find((p) => p.id === activeId)
       const pendingHasActive =
         activePara && pending.some((e) => e.paragraphId === activeId)
-      if (activePara && !pendingHasActive) {
+      if (activePara && !activePara.isNewTextBox && !pendingHasActive) {
         bboxes.push(
-          skipBboxFromParagraphBbox(activePara.bbox, basePageSize.h),
+          skipBboxFromParagraphBbox(
+            previewMaskBboxForStyle(
+              activePara.bbox,
+              basePageSize,
+              activePara,
+              activePara.fontSize,
+            ),
+            basePageSize.h,
+          ),
         )
       }
     }
-    if (movePreviewBbox) {
-      bboxes.push(skipBboxFromParagraphBbox(movePreviewBbox, basePageSize.h))
+    if (movePreviewRegion) {
+      bboxes.push(skipBboxFromParagraphBbox(
+        expandPreviewMaskBbox(movePreviewRegion.bbox, basePageSize),
+        basePageSize.h,
+      ))
     }
     return bboxes
-  }, [pageEdits, basePageSize, activeId, paragraphs, movePreviewBbox])
+  }, [pageEdits, basePageSize, activeId, renderParagraphs, movePreviewRegion])
 
   const enginePreviewRegions = useMemo(() => {
     if (!basePageSize) return []
-    const pending = pageEdits ?? []
-    const regions = pending.map((edit) => edit.bbox)
+    const pending = (pageEdits ?? []).filter((edit) => !edit.skipSourceMask)
+    const paragraphById = new Map(renderParagraphs.map((p) => [p.id, p]))
+    const shouldSkipMoveSourceMask = (edit: ParagraphEdit): boolean => {
+      const delta = edit.positionDelta
+      if (!delta || (Math.abs(delta.dx) < 0.01 && Math.abs(delta.dy) < 0.01)) {
+        return false
+      }
+      return hasOverlappingNeighbor(edit.maskBbox ?? edit.bbox, edit.paragraphId, renderParagraphs)
+    }
+    const regions: EnginePreviewRegion[] = pending
+      .filter((edit) => !shouldSkipMoveSourceMask(edit))
+      .map((edit) => ({
+        bbox: expandPreviewMaskBbox(edit.maskBbox ?? edit.bbox, basePageSize),
+        backgroundColor:
+          edit.backgroundColor ??
+          paragraphById.get(edit.paragraphId)?.backgroundColor ??
+          '#ffffff',
+        preferSolidMask:
+          edit.positionDelta !== undefined &&
+          (Math.abs(edit.positionDelta.dx) >= 0.01 || Math.abs(edit.positionDelta.dy) >= 0.01),
+      }))
     if (activeId) {
-      const activePara = paragraphs.find((p) => p.id === activeId)
+      const activePara = renderParagraphs.find((p) => p.id === activeId)
       const pendingHasActive =
         activePara && pending.some((e) => e.paragraphId === activeId)
-      if (activePara && !pendingHasActive) regions.push(activePara.bbox)
+      if (activePara && !activePara.isNewTextBox && !pendingHasActive) {
+        regions.push({
+          bbox: previewMaskBboxForStyle(
+            activePara.bbox,
+            basePageSize,
+            activePara,
+            activePara.fontSize,
+          ),
+          backgroundColor: activePara.backgroundColor ?? '#ffffff',
+        })
+      }
     }
-    if (movePreviewBbox) regions.push(movePreviewBbox)
+    if (movePreviewRegion) {
+      regions.push({
+        ...movePreviewRegion,
+        bbox: expandPreviewMaskBbox(movePreviewRegion.bbox, basePageSize),
+      })
+    }
     const seen = new Set<string>()
-    return regions.filter((bbox) => {
+    return regions.filter((region) => {
+      const bbox = region.bbox
       const key = `${bbox.x.toFixed(2)}:${bbox.y.toFixed(2)}:${bbox.width.toFixed(2)}:${bbox.height.toFixed(2)}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
     })
-  }, [pageEdits, activeId, paragraphs, movePreviewBbox, basePageSize])
+  }, [pageEdits, activeId, renderParagraphs, movePreviewRegion, basePageSize])
+
+  const overlapSourceRedrawRegions = useMemo<OverlapSourceRedrawRegion[]>(() => {
+    if (!basePageSize) return []
+    const pending = (pageEdits ?? []).filter((edit) => !edit.skipSourceMask)
+    const paragraphById = new Map(renderParagraphs.map((p) => [p.id, p]))
+    const movedOverlapRegions: OverlapSourceRedrawRegion[] = []
+    for (const edit of pending) {
+      const delta = edit.positionDelta
+      if (!delta || (Math.abs(delta.dx) < 0.01 && Math.abs(delta.dy) < 0.01)) {
+        continue
+      }
+      const sourcePara = paragraphById.get(edit.paragraphId)
+      const sourceBbox = edit.maskBbox ?? sourcePara?.bbox ?? edit.bbox
+      const redrawParagraphs = renderParagraphs.filter((p) => {
+        if (p.id === edit.paragraphId) return false
+        if (!paragraphBboxesOverlap(sourceBbox, p.bbox)) return false
+        const neighborEdit = pendingById.get(p.id)
+        const neighborDelta = neighborEdit?.positionDelta
+        return !neighborDelta || (
+          Math.abs(neighborDelta.dx) < 0.01 &&
+          Math.abs(neighborDelta.dy) < 0.01
+        )
+      })
+      if (redrawParagraphs.length === 0) continue
+      movedOverlapRegions.push({
+        bbox: expandPreviewMaskBbox(sourceBbox, basePageSize),
+        backgroundColor:
+          edit.backgroundColor ??
+          sourcePara?.backgroundColor ??
+          '#ffffff',
+        redrawParagraphs,
+      })
+    }
+    return movedOverlapRegions
+  }, [pageEdits, renderParagraphs, pendingById, basePageSize])
 
   // Page-render scale must match the overlay's displayed dimensions.
   // `width` is the DOM canvas width in CSS pixels; basePageSize.w is
@@ -920,7 +2055,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
   // sees the in-memory state.
   const stripFilePath = useTabStore((s) => s.tabs.find((t) => t.id === tabId)?.filePath)
   const stripIsDirty = useTabStore((s) => s.tabs.find((t) => t.id === tabId)?.isDirty ?? false)
-  const { pngUrl: engineStripPngUrl } = useEngineStrippedRender({
+  const { pngUrl: engineStripPngUrl, loading: engineStripLoading } = useEngineStrippedRender({
     pdfBytes,
     pageIndex,
     scale: engineRenderScale,
@@ -936,40 +2071,119 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
     isDirty: stripIsDirty,
   })
 
+  const orderedParagraphs = useMemo(() => {
+    if (frontParagraphStack.length === 0) return renderParagraphs
+    const originalOrder = new Map(renderParagraphs.map((p, index) => [p.id, index]))
+    const stackOrder = new Map(frontParagraphStack.map((id, index) => [id, index]))
+    return [...renderParagraphs].sort((a, b) => {
+      const ar = stackOrder.get(a.id)
+      const br = stackOrder.get(b.id)
+      if (ar === undefined && br === undefined) {
+        return (originalOrder.get(a.id) ?? 0) - (originalOrder.get(b.id) ?? 0)
+      }
+      if (ar === undefined) return -1
+      if (br === undefined) return 1
+      return ar - br
+    })
+  }, [renderParagraphs, frontParagraphStack])
+
+  const topParagraphId = frontParagraphStack[frontParagraphStack.length - 1] ?? null
+
   return (
     <>
-      {engineStripPngUrl && enginePreviewRegions.map((bbox, i) => (
-        <div
-          key={`${bbox.x}:${bbox.y}:${bbox.width}:${bbox.height}:${i}`}
-          data-testid="engine-strip-dirty-region"
-          style={{
-            position: 'absolute',
-            left: bbox.x * engineRenderScale,
-            top: bbox.y * engineRenderScale,
-            width: bbox.width * engineRenderScale,
-            height: bbox.height * engineRenderScale,
-            overflow: 'hidden',
-            zIndex: 4,
-            pointerEvents: 'none',
-            contain: 'layout paint',
-          }}
-        >
-          <img
-            src={engineStripPngUrl}
-            alt=""
-            draggable={false}
+      {enginePreviewRegions.map((region, i) => {
+        const bbox = region.bbox
+        const showFallback = region.preferSolidMask || engineStripLoading || !engineStripPngUrl
+        return (
+          <div
+            key={`${bbox.x}:${bbox.y}:${bbox.width}:${bbox.height}:${i}`}
+            data-testid="engine-strip-dirty-region"
             style={{
               position: 'absolute',
-              left: -bbox.x * engineRenderScale,
-              top: -bbox.y * engineRenderScale,
-              width,
-              height,
-              userSelect: 'none',
+              left: bbox.x * engineRenderScale,
+              top: bbox.y * engineRenderScale,
+              width: bbox.width * engineRenderScale,
+              height: bbox.height * engineRenderScale,
+              overflow: 'hidden',
+              zIndex: 4,
+              pointerEvents: 'none',
+              contain: 'layout paint',
+              background: showFallback ? (region.backgroundColor ?? '#ffffff') : 'transparent',
             }}
-          />
-        </div>
-      ))}
-      {active && clusterDone && paragraphs.length === 0 && (
+          >
+            {!showFallback && (
+              <img
+                src={engineStripPngUrl}
+                alt=""
+                draggable={false}
+                style={{
+                  position: 'absolute',
+                  left: -bbox.x * engineRenderScale,
+                  top: -bbox.y * engineRenderScale,
+                  width,
+                  height,
+                  userSelect: 'none',
+                }}
+              />
+            )}
+          </div>
+        )
+      })}
+      {overlapSourceRedrawRegions.map((region, i) => {
+        const bbox = region.bbox
+        return (
+          <div
+            key={`overlap-source:${bbox.x}:${bbox.y}:${bbox.width}:${bbox.height}:${i}`}
+            data-testid="overlap-source-redraw-region"
+            style={{
+              position: 'absolute',
+              left: bbox.x * engineRenderScale,
+              top: bbox.y * engineRenderScale,
+              width: bbox.width * engineRenderScale,
+              height: bbox.height * engineRenderScale,
+              overflow: 'hidden',
+              zIndex: 4,
+              pointerEvents: 'none',
+              contain: 'layout paint',
+              background: region.backgroundColor ?? '#ffffff',
+            }}
+          >
+            {region.redrawParagraphs.map((p) => {
+              const pending = pendingById.get(p.id)
+              const redrawBbox = pending?.bbox ?? p.bbox
+              const text = pending?.newText ?? p.originalText
+              const fontSize = pending?.fontSize ?? p.fontSize
+              const fontFamily = pending?.fontFamily ?? p.fontFamily ?? FALLBACK_FONT_STACK
+              const color = pending?.color ?? p.color
+              const lineHeight = (pending as { lineHeight?: number } | undefined)?.lineHeight ?? 1.2
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    position: 'absolute',
+                    left: (redrawBbox.x - bbox.x) * engineRenderScale,
+                    top: (redrawBbox.y - bbox.y) * engineRenderScale,
+                    width: redrawBbox.width * engineRenderScale,
+                    height: redrawBbox.height * engineRenderScale,
+                    overflow: 'hidden',
+                    color,
+                    fontFamily,
+                    fontSize: Math.max(6, fontSize * engineRenderScale),
+                    fontWeight: p.bold ? 700 : 400,
+                    fontStyle: p.italic ? 'italic' : 'normal',
+                    lineHeight,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {text}
+                </div>
+              )
+            })}
+          </div>
+        )
+      })}
+      {active && tool === 'edit_text' && clusterDone && paragraphs.length === 0 && (
         // Empty state: page has no extractable text.
         // Centered prompt with "Run OCR + edit" button. Uses the OCR
         // pipeline to rasterize + recognize this single page, then
@@ -1162,6 +2376,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
       )}
       <div
       ref={layerRef}
+      onClick={placeNewTextBox}
       style={{
         position: 'absolute',
         top: 0,
@@ -1175,23 +2390,32 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
         // in modeless terms) we short-circuit by rendering no children —
         // cluster state stays cached in React state so switching back
         // is instant.
-        pointerEvents: 'none',
+        pointerEvents: tool === 'text' ? 'auto' : 'none',
+        cursor: tool === 'text' ? 'text' : 'default',
       }}
       data-testid="editable-paragraph-layer"
       data-active={active ? '1' : '0'}
     >
-      {active && paragraphs.map((p) => {
+      {active && orderedParagraphs.map((p) => {
         const pending = pendingById.get(p.id)
+        const isDirty = dirtyById.has(p.id)
+        const isSavedPreview = savedPreviewById.has(p.id)
         const text = pending?.newText ?? p.originalText
         const committedDelta = pending?.positionDelta ?? { dx: 0, dy: 0 }
         const currentFontSize = pending?.fontSize ?? p.fontSize
         const currentColor = pending?.color ?? p.color
         const currentFontFamily = pending?.fontFamily ?? p.fontFamily ?? 'Helvetica'
+        const currentBold = pending?.bold ?? p.bold
+        const currentItalic = pending?.italic ?? p.italic
+        const currentUnderline = pending?.underline ?? false
+        const currentStrikethrough = pending?.strikethrough ?? false
         // ParagraphBox doesn't carry lineHeight today (originals come
         // from pdfjs item heights, not from the source PDF's TL); the
         // pending entry tracks user overrides. Default 1.2 mirrors
         // browsers / Word.
         const currentLineHeight = (pending as { lineHeight?: number } | undefined)?.lineHeight ?? 1.2
+        const redactionTargetId = redactionMarkTargetId('paragraph', pageIndex, p.id)
+        const isRedactionMarked = fabricJsonHasRedactionMarkForTarget(pageFabricJSON, redactionTargetId)
         return (
           <ParagraphEditor
             key={p.id}
@@ -1200,14 +2424,26 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
             pageWidth={basePageSize?.w ?? 0}
             pageHeight={basePageSize?.h ?? 0}
             active={activeId === p.id}
+            isFront={topParagraphId === p.id}
             isEdited={!!pending}
+            isDirty={isDirty}
+            isSavedPreview={isSavedPreview}
+            displayBbox={pending?.bbox ?? p.bbox}
             initialText={text}
+            initialRuns={pending?.runs ?? p.runs}
             currentAlign={pending?.align ?? 'left'}
             committedDelta={committedDelta}
             currentFontSize={currentFontSize}
             currentColor={currentColor}
             currentFontFamily={currentFontFamily}
             currentLineHeight={currentLineHeight}
+            currentBold={currentBold}
+            currentItalic={currentItalic}
+            currentUnderline={currentUnderline}
+            currentStrikethrough={currentStrikethrough}
+            markRedactionMode={tool === 'mark_redaction'}
+            isRedactionMarked={isRedactionMarked}
+            onMarkRedaction={() => markParagraphForRedaction(p, pending?.bbox ?? p.bbox, committedDelta)}
             onActivate={() => {
               // While linkingMode is on, paragraph clicks ADD frames
               // to the in-progress chain instead of activating for
@@ -1217,14 +2453,35 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
                 addFrameToLinkChain(p)
                 return
               }
+              bringParagraphToFront(p.id)
               setActiveId(p.id)
             }}
+            onBringToFront={() => bringParagraphToFront(p.id)}
             onDeactivate={() => setActiveId(null)}
-            onCommit={(newText) => commitEdit(p, newText)}
+            onCommit={(newText, options) => commitEdit(p, newText, undefined, options)}
             onAlign={(align) => setParagraphAlign(p, align)}
             onMove={(delta) => commitMove(p, delta)}
-            onMovePreview={(bbox) => setMovePreviewBbox(bbox)}
-            onMovePreviewEnd={() => setMovePreviewBbox(null)}
+            onMovePreview={(bbox) => {
+              const sourceMaskBbox = basePageSize
+                ? previewMaskBboxForStyle(
+                  bbox,
+                  basePageSize,
+                  pending ?? p,
+                  currentFontSize,
+                )
+                : bbox
+              if (hasOverlappingNeighbor(sourceMaskBbox, p.id, renderParagraphs)) {
+                setMovePreviewRegion(null)
+                return
+              }
+              setMovePreviewRegion({
+                bbox: sourceMaskBbox,
+                backgroundColor: p.backgroundColor ?? '#ffffff',
+                preferSolidMask: true,
+              })
+            }}
+            onMovePreviewEnd={() => setMovePreviewRegion(null)}
+            onSuppressNextLayerClick={suppressNextLayerClickAfterDrag}
             onCrossPageDrop={(toPage, toBbox) => {
               // True drag-and-drop across pages: emit a ParagraphMove
               // that lands centered at the drop point on the
@@ -1234,6 +2491,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
                 (e) => e.paragraphId === p.id,
               )
               const text = pending?.newText ?? p.originalText
+              const runs = pending?.runs ?? p.runs
               pushParagraphMove(tabId, pageIndex, {
                 paragraphId: p.id,
                 fromPage: pageIndex,
@@ -1247,17 +2505,23 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
                 italic: p.italic,
                 color: p.color,
                 backgroundColor: p.backgroundColor,
+                ...(runs ? { runs } : {}),
               })
               // Clear the activeId so the source-page editor doesn't
               // keep showing a stale active state for a paragraph
               // that's now visually on another page.
               setActiveId(null)
+              setFrontParagraphStack((prev) => prev.filter((id) => id !== p.id))
             }}
             pageIndexForDrag={pageIndex}
-            onFontSize={(size) => setParagraphFontSize(p, size)}
-            onColor={(hex) => setParagraphColor(p, hex)}
+            onFontSize={(size) => applyCharStyle(p, 'fontSize', size)}
+            onColor={(hex) => applyCharStyle(p, 'color', hex)}
             onFontFamily={(ff) => setParagraphFontFamily(p, ff)}
             onLineHeight={(lh) => setParagraphLineHeight(p, lh)}
+            onBold={(bold) => applyCharStyle(p, 'bold', bold)}
+            onItalic={(italic) => applyCharStyle(p, 'italic', italic)}
+            onUnderline={(underline) => applyCharStyle(p, 'underline', underline)}
+            onStrikethrough={(strikethrough) => applyCharStyle(p, 'strikethrough', strikethrough)}
             onResize={(newBbox) => commitResize(p, newBbox)}
           />
         )
@@ -1275,19 +2539,28 @@ interface ParagraphEditorProps {
   pageWidth: number
   pageHeight: number
   active: boolean
+  isFront: boolean
   isEdited: boolean
+  isDirty: boolean
+  isSavedPreview: boolean
+  displayBbox: ParagraphBox['bbox']
   initialText: string
+  /** Styled character runs for the current edit, if any. When present the
+   *  editor seeds rich (per-span) HTML instead of plain text. */
+  initialRuns?: StyledRun[]
   currentAlign: TextAlign
   /** Committed drag offset from the store (in viewport units). Live drag
    *  additions are layered on top while the pointer is down. */
   committedDelta: { dx: number; dy: number }
   onActivate: () => void
+  onBringToFront: () => void
   onDeactivate: () => void
-  onCommit: (newText: string) => void
+  onCommit: (newText: string, options?: ParagraphCommitOptions) => void
   onAlign: (align: TextAlign) => void
   onMove: (delta: { dx: number; dy: number }) => void
   onMovePreview: (bbox: ParagraphBox['bbox']) => void
   onMovePreviewEnd: () => void
+  onSuppressNextLayerClick: () => void
   /** Cross-page drop: pointer-up landed on a DIFFERENT page than
    *  this paragraph's source page. The handler emits a
    *  ParagraphMove instead of a positionDelta so the saved PDF
@@ -1298,7 +2571,7 @@ interface ParagraphEditorProps {
   /** Source page index — used by the cross-page drop detection to
    *  filter out same-page drops. Passed in from EditableParagraphLayer. */
   pageIndexForDrag: number
-  /** Contextual toolbar tweaks for paragraph editing. */
+  /** Phase E (docs/MODELESS.md): contextual toolbar tweaks. */
   currentFontSize: number
   currentColor: string
   onFontSize: (size: number) => void
@@ -1307,8 +2580,19 @@ interface ParagraphEditorProps {
    *  Defaults to 'Helvetica' / 1.2 if the paragraph has no override. */
   currentFontFamily: string
   currentLineHeight: number
+  currentBold: boolean
+  currentItalic: boolean
+  currentUnderline: boolean
+  currentStrikethrough: boolean
+  markRedactionMode: boolean
+  isRedactionMarked: boolean
+  onMarkRedaction: () => void
   onFontFamily: (fontFamily: string) => void
   onLineHeight: (lineHeight: number) => void
+  onBold: (bold: boolean) => void
+  onItalic: (italic: boolean) => void
+  onUnderline: (underline: boolean) => void
+  onStrikethrough: (strikethrough: boolean) => void
   /** Acrobat-style corner-grip resize. Called on pointer-up after a
    *  drag; receives the new bbox in viewport (scale=1) coords.
    *  Resize is grow-only — the parent constrains so width/height
@@ -1322,23 +2606,37 @@ interface ParagraphEditorProps {
 // as a drag rather than a click. 3px matches browser click-jitter tolerance.
 const DRAG_THRESHOLD_PX = 3
 
+function elementHasOverflow(el: HTMLElement): boolean {
+  return (
+    el.scrollHeight > el.clientHeight + 1 ||
+    el.scrollWidth > el.clientWidth + 1
+  )
+}
+
 function ParagraphEditor({
   paragraph,
   scale,
   pageWidth,
   pageHeight,
   active,
+  isFront,
   isEdited,
+  isDirty,
+  isSavedPreview,
+  displayBbox,
   initialText,
+  initialRuns,
   currentAlign,
   committedDelta,
   onActivate,
+  onBringToFront,
   onDeactivate,
   onCommit,
   onAlign,
   onMove,
   onMovePreview,
   onMovePreviewEnd,
+  onSuppressNextLayerClick,
   onCrossPageDrop,
   pageIndexForDrag,
   currentFontSize,
@@ -1347,14 +2645,49 @@ function ParagraphEditor({
   onColor,
   currentFontFamily,
   currentLineHeight,
+  currentBold,
+  currentItalic,
+  currentUnderline,
+  currentStrikethrough,
+  markRedactionMode,
+  isRedactionMarked,
+  onMarkRedaction,
   onFontFamily,
   onLineHeight,
+  onBold,
+  onItalic,
+  onUnderline,
+  onStrikethrough,
   onResize,
 }: ParagraphEditorProps) {
   const divRef = useRef<HTMLDivElement>(null)
   // Shadow state so we don't rewrite the div on every commit (would reset
   // caret). We only seed it when (paragraph,initialText) changes.
   const seededRef = useRef<string>('')
+  const editStartTextRef = useRef(initialText)
+  const wasActiveRef = useRef(false)
+  const [hovered, setHovered] = useState(false)
+  const [focused, setFocused] = useState(false)
+  const [hasOverflow, setHasOverflow] = useState(false)
+
+  useEffect(() => {
+    if (active && !wasActiveRef.current) {
+      editStartTextRef.current = initialText
+    }
+    if (!active) {
+      editStartTextRef.current = initialText
+      setFocused(false)
+    }
+    wasActiveRef.current = active
+  }, [active, initialText])
+
+  useEffect(() => {
+    if (!active) return
+    const syncFocus = () => setFocused(document.activeElement === divRef.current)
+    syncFocus()
+    const raf = requestAnimationFrame(syncFocus)
+    return () => cancelAnimationFrame(raf)
+  }, [active])
 
   useEffect(() => {
     const el = divRef.current
@@ -1371,17 +2704,49 @@ function ParagraphEditor({
     // back, the paragraph is still active, and we haven't seeded yet).
     // The caret-reset concern doesn't apply because there's no caret
     // to preserve — we'd just be filling an empty box with its text.
+    // Rich seed when the edit carries per-run styling: spans instead of a
+    // flat text node, so mixed bold/size/color shows live. seedSig keys the
+    // re-seed decision so changing runs (while not typing) re-renders, but a
+    // matching signature skips the rewrite that would reset the caret.
+    const richHtml =
+      initialRuns && editCarriesRunStyling({ runs: initialRuns } as ParagraphEdit)
+        ? runsToHtml(initialRuns, scale)
+        : null
+    const seedSig = richHtml !== null ? `h:${richHtml}` : `t:${initialText}`
     const currentText = el.textContent ?? ''
     const focused = document.activeElement === el || el.contains(document.activeElement)
     if (active && focused && currentText.length > 0 && currentText === initialText) {
-      seededRef.current = initialText
+      seededRef.current = seedSig
       return
     }
-    if (currentText !== initialText || seededRef.current !== initialText) {
-      el.textContent = initialText
-      seededRef.current = initialText
+    if (currentText !== initialText || seededRef.current !== seedSig) {
+      if (richHtml !== null) el.innerHTML = richHtml
+      else el.textContent = initialText
+      seededRef.current = seedSig
     }
-  }, [initialText, active])
+  }, [initialText, initialRuns, scale, active])
+
+  const measureOverflow = useCallback(() => {
+    requestAnimationFrame(() => {
+      const el = divRef.current
+      if (!el) return
+      setHasOverflow(elementHasOverflow(el))
+    })
+  }, [])
+
+  useEffect(() => {
+    measureOverflow()
+  }, [
+    measureOverflow,
+    initialText,
+    active,
+    currentAlign,
+    currentFontSize,
+    currentLineHeight,
+    displayBbox.width,
+    displayBbox.height,
+    scale,
+  ])
 
   // ── Drag state ──────────────────────────────────────────────────
   // localDelta is the authoritative paragraph offset for this child,
@@ -1419,6 +2784,15 @@ function ParagraphEditor({
   // activating the contenteditable (otherwise dragging a paragraph
   // would also drop you into edit mode).
   const justDraggedRef = useRef(false)
+  const suppressImmediateDragClick = useCallback(() => {
+    justDraggedRef.current = true
+    // Chromium normally emits the drag-ending click immediately after
+    // pointerup, before timers run. If it suppresses that click, clear the
+    // guard so the user's next intentional click still opens the editor.
+    window.setTimeout(() => {
+      justDraggedRef.current = false
+    }, 0)
+  }, [])
 
   const clampDelta = useCallback(
     (dx: number, dy: number): { dx: number; dy: number } => {
@@ -1427,33 +2801,41 @@ function ParagraphEditor({
       // (which are scale=1, matching bbox units).
       if (pageWidth <= 0 || pageHeight <= 0) return { dx, dy }
       const minVisible = 12 // viewport units
-      const minX = minVisible - paragraph.bbox.x - paragraph.bbox.width
-      const maxX = pageWidth - paragraph.bbox.x - minVisible
-      const minY = minVisible - paragraph.bbox.y - paragraph.bbox.height
-      const maxY = pageHeight - paragraph.bbox.y - minVisible
+      const minX = minVisible - displayBbox.x - displayBbox.width
+      const maxX = pageWidth - displayBbox.x - minVisible
+      const minY = minVisible - displayBbox.y - displayBbox.height
+      const maxY = pageHeight - displayBbox.y - minVisible
       return {
         dx: Math.max(minX, Math.min(maxX, dx)),
         dy: Math.max(minY, Math.min(maxY, dy)),
       }
     },
-    [pageWidth, pageHeight, paragraph.bbox.x, paragraph.bbox.y, paragraph.bbox.width, paragraph.bbox.height],
+    [pageWidth, pageHeight, displayBbox.x, displayBbox.y, displayBbox.width, displayBbox.height],
   )
 
-  const left = (paragraph.bbox.x + localDelta.dx) * scale
-  const top = (paragraph.bbox.y + localDelta.dy) * scale
-  const boxW = paragraph.bbox.width * scale
-  const boxH = paragraph.bbox.height * scale
-  const displayFontSize = Math.max(6, paragraph.fontSize * scale)
+  const left = (displayBbox.x + localDelta.dx) * scale
+  const top = (displayBbox.y + localDelta.dy) * scale
+  const boxW = displayBbox.width * scale
+  const boxH = displayBbox.height * scale
+  const displayFontSize = Math.max(6, currentFontSize * scale)
   // Resolved font stack from pdfjs styles, with fallback.
-  const fontStack = paragraph.fontFamily || FALLBACK_FONT_STACK
+  const fontStack = currentFontFamily || paragraph.fontFamily || FALLBACK_FONT_STACK
   const isDragging = pointerRef.current?.dragging === true
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (markRedactionMode) {
+      e.preventDefault()
+      e.stopPropagation()
+      onMarkRedaction()
+      return
+    }
     // While editing text, let the contenteditable handle pointer events
     // normally (caret placement, text selection). Drag only applies to
     // unopened paragraphs.
     if (active) return
     if (e.button !== 0) return
+    onBringToFront()
+    onDeactivate()
     pointerRef.current = {
       startClientX: e.clientX,
       startClientY: e.clientY,
@@ -1479,7 +2861,8 @@ function ParagraphEditor({
     const rawDy = e.clientY - st.startClientY
     if (!st.dragging && Math.hypot(rawDx, rawDy) > DRAG_THRESHOLD_PX) {
       st.dragging = true
-      onMovePreview(paragraph.bbox)
+      onBringToFront()
+      onMovePreview(displayBbox)
     }
     if (st.dragging) {
       const next = clampDelta(
@@ -1502,6 +2885,8 @@ function ParagraphEditor({
     pointerRef.current = null
     onMovePreviewEnd()
     if (wasDragging) {
+      onBringToFront()
+      onSuppressNextLayerClick()
       // Cross-page drop detection: if the pointer landed on a
       // different page's [data-page-display-index] container, route
       // the commit through onCrossPageDrop instead of onMove. The
@@ -1544,13 +2929,13 @@ function ParagraphEditor({
         // Center the paragraph at the drop point — matches user
         // intuition ("I'm pointing at where I want it to land").
         const toBbox = {
-          x: dropX - paragraph.bbox.width / 2,
-          y: dropY - paragraph.bbox.height / 2,
-          width: paragraph.bbox.width,
-          height: paragraph.bbox.height,
+          x: dropX - displayBbox.width / 2,
+          y: dropY - displayBbox.height / 2,
+          width: displayBbox.width,
+          height: displayBbox.height,
         }
         onCrossPageDrop(toPageIdx, toBbox)
-        justDraggedRef.current = true
+        suppressImmediateDragClick()
         return
       }
 
@@ -1563,7 +2948,7 @@ function ParagraphEditor({
       )
       setLocalDelta(finalDelta)
       onMove(finalDelta)
-      justDraggedRef.current = true
+      suppressImmediateDragClick()
     }
   }
 
@@ -1572,9 +2957,62 @@ function ParagraphEditor({
   // preview. This child only renders the lifted text at its live
   // position; it never paints a source mask.
   const hasMoved = Math.abs(localDelta.dx) > 0.01 || Math.abs(localDelta.dy) > 0.01
-  const previewMaskBackground = paragraph.backgroundColor
-    || (paragraph.onDarkBackground ? '#0f1115' : '#ffffff')
-  const shouldMaskEditorBackground = active || (isEdited && !hasMoved)
+  const movedPreviewWidthSlack = hasMoved && !active ? Math.max(48, displayFontSize * 8) : 0
+  const previewMaskBackground = paragraph.backgroundColor === 'transparent'
+    ? 'transparent'
+    : paragraph.backgroundColor || (paragraph.onDarkBackground ? '#0f1115' : '#ffffff')
+  const shouldMaskEditorBackground = active || isEdited || hasMoved || isDragging
+  const isEditing = active && focused
+  const paragraphState = isEditing
+    ? 'editing'
+    : isRedactionMarked
+      ? 'redaction-marked'
+      : active
+      ? 'active'
+      : isSavedPreview
+        ? 'saved-preview'
+        : isDirty
+          ? 'dirty'
+          : hovered
+            ? 'hover'
+            : 'idle'
+  const outline =
+    paragraphState === 'editing'
+      ? '2px solid #0ea5e9'
+      : paragraphState === 'redaction-marked'
+        ? '3px solid #000000'
+      : paragraphState === 'active'
+        ? '2px solid #2563eb'
+        : paragraphState === 'dirty'
+          ? '1.5px solid #f59e0b'
+          : paragraphState === 'saved-preview'
+            ? '1.5px solid #22c55e'
+            : paragraphState === 'hover'
+              ? '1px dashed rgba(37, 99, 235, 0.85)'
+              : '1px dashed rgba(37, 99, 235, 0.32)'
+  const outlineOffset = isRedactionMarked ? 0 : active || isEdited || hovered ? 2 : 1
+  const selectionShadow =
+    paragraphState === 'editing'
+      ? '0 0 0 4px rgba(14, 165, 233, 0.14)'
+      : paragraphState === 'redaction-marked'
+        ? '0 0 0 2px rgba(0, 0, 0, 0.20)'
+      : paragraphState === 'active'
+        ? '0 0 0 4px rgba(37, 99, 235, 0.12)'
+        : paragraphState === 'dirty'
+          ? '0 0 0 3px rgba(245, 158, 11, 0.10)'
+          : paragraphState === 'saved-preview'
+            ? '0 0 0 3px rgba(34, 197, 94, 0.10)'
+            : 'none'
+  const visibleTextColor = currentColor || paragraph.color
+  const layerZ = isDragging
+    ? 10
+    : active
+      ? 9
+      : isFront
+        ? 8
+        : (isEdited || hasMoved)
+          ? 7
+          : 5
   return (
     <>
     {active && (
@@ -1584,7 +3022,7 @@ function ParagraphEditor({
         width={boxW}
         height={boxH}
         scale={scale}
-        baseBbox={paragraph.bbox}
+        baseBbox={displayBbox}
         onResize={onResize}
       />
     )}
@@ -1598,11 +3036,19 @@ function ParagraphEditor({
         currentColor={currentColor}
         currentFontFamily={currentFontFamily}
         currentLineHeight={currentLineHeight}
+        currentBold={currentBold}
+        currentItalic={currentItalic}
+        currentUnderline={currentUnderline}
+        currentStrikethrough={currentStrikethrough}
         onAlign={onAlign}
         onFontSize={onFontSize}
         onColor={onColor}
         onFontFamily={onFontFamily}
         onLineHeight={onLineHeight}
+        onBold={onBold}
+        onItalic={onItalic}
+        onUnderline={onUnderline}
+        onStrikethrough={onStrikethrough}
       />
     )}
     <div
@@ -1610,43 +3056,38 @@ function ParagraphEditor({
         position: 'absolute',
         left,
         top,
-        width: boxW,
-        minHeight: boxH,
+        width: boxW + movedPreviewWidthSlack,
+        height: boxH,
+        boxSizing: 'border-box',
         pointerEvents: 'auto',
-        zIndex: active || isEdited || isDragging || hasMoved ? 6 : 5,
-        cursor: active ? 'text' : isDragging ? 'grabbing' : 'grab',
-        // While actively dragging, dim the outline so the user perceives
-        // the box as "picked up". Otherwise keep the existing three-state
-        // Acrobat-style affordance.
-        outline: active
-          ? '2px solid #89b4fa'
-          : isDragging
-            ? '2px solid #89b4fa'
-            : isEdited
-              ? '1px solid #f59e0b'
-              : '1px dashed rgba(137,180,250,0.5)',
-        outlineOffset: 0,
-        // When editing in place, mask the canvas beneath so the caret
-        // and typed text are clear. Once a paragraph is being moved,
-        // the origin mask above hides the old glyphs; the moved text
-        // itself stays transparent so the drag preview feels like the
-        // text is actually sliding over the page instead of carrying a
-        // visible white card with it.
+        zIndex: layerZ,
+        cursor: markRedactionMode ? 'pointer' : active ? 'text' : isDragging ? 'grabbing' : 'grab',
+        outline: isDragging ? '2px solid #0ea5e9' : outline,
+        outlineOffset,
+        boxShadow: isDragging ? '0 0 0 4px rgba(14, 165, 233, 0.14)' : selectionShadow,
+        // Mask the canvas beneath the live paragraph. Moved paragraphs
+        // need the same destination mask after drag-end; otherwise an
+        // overlapped paragraph underneath can visually bleed through
+        // even though the moved paragraph is the correct top hit target.
         background: shouldMaskEditorBackground ? previewMaskBackground : 'transparent',
-        color: active || isEdited || isDragging ? paragraph.color : 'transparent',
-        caretColor: paragraph.color,
+        color: active || isEdited || isDragging ? visibleTextColor : 'transparent',
+        caretColor: visibleTextColor,
         fontFamily: fontStack,
         fontSize: displayFontSize,
-        fontWeight: paragraph.bold ? 700 : 400,
-        fontStyle: paragraph.italic ? 'italic' : 'normal',
+        fontWeight: currentBold ? 700 : 400,
+        fontStyle: currentItalic ? 'italic' : 'normal',
+        textDecorationLine: [
+          currentUnderline ? 'underline' : '',
+          currentStrikethrough ? 'line-through' : '',
+        ].filter(Boolean).join(' ') || 'none',
         // Reflect alignment live in the contenteditable so the in-edit
         // view matches what save will produce.
         textAlign: currentAlign === 'justify' ? 'justify' : currentAlign,
-        lineHeight: 1.2,
+        lineHeight: currentLineHeight,
         padding: 0,
         overflow: 'hidden',
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
+        whiteSpace: hasMoved && !active ? 'pre' : 'pre-wrap',
+        wordBreak: hasMoved && !active ? 'normal' : 'break-word',
         // Suppress default text selection during drag — otherwise
         // clicking-and-dragging would start a selection before our
         // threshold kicks in.
@@ -1655,11 +3096,14 @@ function ParagraphEditor({
         // Prevent the browser's native drag-ghost on text.
         touchAction: 'none',
       }}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onClick={() => {
+        if (markRedactionMode) return
         if (justDraggedRef.current) {
           // Click that follows a drag release — swallow it, don't
           // activate the editor.
@@ -1667,37 +3111,93 @@ function ParagraphEditor({
           return
         }
         if (!active) {
+          onBringToFront()
           onActivate()
           // Defer focus so the browser applies contentEditable before
           // .focus(); otherwise caret placement is flaky.
           requestAnimationFrame(() => {
             divRef.current?.focus()
+            setFocused(document.activeElement === divRef.current)
+            measureOverflow()
           })
         }
       }}
+      onFocus={() => {
+        setFocused(true)
+        measureOverflow()
+      }}
       onBlur={(e) => {
+        setFocused(false)
         // Use readMultilineText (innerText-style) instead of textContent
         // so user-pressed Enter / inserted <div>/<br> survives as \n.
         // textContent flattened newlines and the engine saw a single
         // line — that was G7 in the ledger.
-        const newText = readMultilineText(e.currentTarget as HTMLDivElement)
-        onCommit(newText)
-        onDeactivate()
+        const el = e.currentTarget as HTMLDivElement
+        const newText = readMultilineText(el)
+        // Capture per-run styling from the live DOM (spans). undefined when
+        // the box is plain, so plain edits stay on the flat/rewrite path.
+        const rawRuns = readStyledRuns(el, scale)
+        const runs = editCarriesRunStyling({ runs: rawRuns } as ParagraphEdit) ? rawRuns : undefined
+        onCommit(newText, { runs, clipToBbox: elementHasOverflow(el) })
+        const nextFocus = e.relatedTarget
+        const toolbarInteractionAt =
+          (window as Window & { __openSatchelTextToolbarPointerAt?: number })
+            .__openSatchelTextToolbarPointerAt ?? 0
+        const fromTextToolbar = Date.now() - toolbarInteractionAt < 800
+        const focusMovedToToolbar =
+          nextFocus instanceof Element &&
+          nextFocus.closest('[data-testid="paragraph-context-toolbar"], [data-group-label="Text"]')
+        if (fromTextToolbar || focusMovedToToolbar) {
+          measureOverflow()
+          return
+        }
+        window.setTimeout(() => {
+          const latestToolbarInteractionAt =
+            (window as Window & { __openSatchelTextToolbarPointerAt?: number })
+              .__openSatchelTextToolbarPointerAt ?? 0
+          const latestFocus = document.activeElement
+          const toolbarStillOwnsInteraction =
+            Date.now() - latestToolbarInteractionAt < 800 ||
+            (
+              latestFocus instanceof Element &&
+              latestFocus.closest('[data-testid="paragraph-context-toolbar"], [data-group-label="Text"]')
+            )
+          if (toolbarStillOwnsInteraction) {
+            measureOverflow()
+            return
+          }
+          onDeactivate()
+          measureOverflow()
+        }, 0)
       }}
       onInput={(e) => {
         // Commit on every input so state is always up to date. We skip
         // rewriting div contents on commit (seededRef guard above), so
         // the caret doesn't jump.
-        const newText = readMultilineText(e.currentTarget as HTMLDivElement)
-        onCommit(newText)
+        const el = e.currentTarget as HTMLDivElement
+        const newText = readMultilineText(el)
+        // Capture per-run styling from the live DOM (spans). undefined when
+        // the box is plain, so plain edits stay on the flat/rewrite path.
+        const rawRuns = readStyledRuns(el, scale)
+        const runs = editCarriesRunStyling({ runs: rawRuns } as ParagraphEdit) ? rawRuns : undefined
+        onCommit(newText, { runs, clipToBbox: elementHasOverflow(el) })
+        measureOverflow()
       }}
       onKeyDown={(e) => {
-        // Escape: cancel back to original text, blur.
+        // Escape: cancel the current edit session, blur.
         if (e.key === 'Escape') {
           e.preventDefault()
-          if (divRef.current) divRef.current.textContent = paragraph.originalText
-          onCommit(paragraph.originalText)
+          const cancelText = editStartTextRef.current
+          if (divRef.current) {
+            divRef.current.textContent = cancelText
+            seededRef.current = cancelText
+          }
+          onCommit(cancelText, {
+            clipToBbox: divRef.current ? elementHasOverflow(divRef.current) : false,
+          })
+          measureOverflow()
           divRef.current?.blur()
+          return
         }
         // Alignment shortcuts — Word/GDocs convention: Ctrl+L/E/R/J.
         // ctrlKey covers both Ctrl (Win/Linux) and Cmd (macOS via metaKey)
@@ -1713,14 +3213,45 @@ function ParagraphEditor({
       contentEditable={active}
       suppressContentEditableWarning
       ref={divRef}
+      data-testid="paragraph-editor"
       data-paragraph-id={paragraph.id}
+      data-paragraph-state={paragraphState}
+      data-dirty={isDirty ? '1' : '0'}
+      data-front={isFront ? '1' : '0'}
+      data-saved-preview={isSavedPreview ? '1' : '0'}
+      data-overflow={hasOverflow ? '1' : '0'}
+      data-focused={focused ? '1' : '0'}
+      data-layout-role={paragraph.layout?.role ?? ''}
+      data-layout-safe={paragraph.layout?.safeForAutoReflow === false ? '0' : '1'}
+      data-layout-flow={paragraph.layout?.flowId ?? ''}
+      data-layout-reasons={paragraph.layout?.reasons?.join('; ') ?? ''}
+      data-layout-align={paragraph.layout?.align ?? ''}
+      data-font-generic-fallback={paragraph.fontFamilyIsGenericFallback === true ? '1' : '0'}
     />
+    {hasOverflow && (active || isEdited) && (
+      <div
+        data-testid="paragraph-overflow-indicator"
+        title="Text overflow"
+        style={{
+          position: 'absolute',
+          left: left + boxW + movedPreviewWidthSlack + 3,
+          top: top + boxH - 9,
+          width: 9,
+          height: 9,
+          background: '#f97316',
+          clipPath: 'polygon(0 0, 100% 50%, 0 100%)',
+          pointerEvents: 'none',
+          zIndex: 22,
+          filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.28))',
+        }}
+      />
+    )}
     </>
   )
 }
 
 // ── Paragraph context toolbar ────────────────────────────────────
-// Floating strip that appears above the
+// Phase E of docs/MODELESS.md. Floating strip that appears above the
 // active paragraph, ALONGSIDE the main ribbon (not replacing it) —
 // matches Word's "mini-toolbar" and Google Docs' selection toolbar.
 // Provides quick access to the edits a user is most likely to make
@@ -1745,6 +3276,7 @@ const LINE_HEIGHTS: { value: number; label: string }[] = [
   { value: 2.5, label: '2.5' },
   { value: 3.0, label: '3.0' },
 ]
+const PARAGRAPH_STYLE_EVENT = 'open-satchel:paragraph-style'
 
 interface ParagraphContextToolbarProps {
   left: number
@@ -1755,11 +3287,19 @@ interface ParagraphContextToolbarProps {
   currentColor: string
   currentFontFamily: string
   currentLineHeight: number
+  currentBold: boolean
+  currentItalic: boolean
+  currentUnderline: boolean
+  currentStrikethrough: boolean
   onAlign: (align: TextAlign) => void
   onFontSize: (size: number) => void
   onColor: (hex: string) => void
   onFontFamily: (fontFamily: string) => void
   onLineHeight: (lineHeight: number) => void
+  onBold: (bold: boolean) => void
+  onItalic: (italic: boolean) => void
+  onUnderline: (underline: boolean) => void
+  onStrikethrough: (strikethrough: boolean) => void
 }
 
 function ParagraphContextToolbar({
@@ -1771,11 +3311,19 @@ function ParagraphContextToolbar({
   currentColor,
   currentFontFamily,
   currentLineHeight,
+  currentBold,
+  currentItalic,
+  currentUnderline,
+  currentStrikethrough,
   onAlign,
   onFontSize,
   onColor,
   onFontFamily,
   onLineHeight,
+  onBold,
+  onItalic,
+  onUnderline,
+  onStrikethrough,
 }: ParagraphContextToolbarProps) {
   // Position toolbar just above the paragraph box. Clamp to min-top so
   // paragraphs near the very top of the page still show the toolbar.
@@ -1800,8 +3348,8 @@ function ParagraphContextToolbar({
         position: 'absolute',
         left: Math.max(2, left),
         top: toolbarTop,
-        minWidth: 230,
-        maxWidth: Math.max(260, width),
+        minWidth: 286,
+        maxWidth: Math.max(320, width),
         height: TOOLBAR_H,
         background: 'var(--bg-surface, #1e222b)',
         border: '1px solid var(--border, #2a2f3a)',
@@ -1815,8 +3363,32 @@ function ParagraphContextToolbar({
         boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
       }}
       // Don't steal focus from the contenteditable when clicking inside
-      // the toolbar itself.
-      onMouseDown={(e) => e.preventDefault()}
+      // toolbar buttons. Native form controls need their default
+      // mousedown so select menus and color pickers can open.
+      onMouseDown={(e) => {
+        ;(window as Window & { __openSatchelTextToolbarPointerAt?: number })
+          .__openSatchelTextToolbarPointerAt = Date.now()
+        const target = e.target
+        if (
+          target instanceof Element &&
+          target.closest('select, input, textarea, option')
+        ) {
+          return
+        }
+        e.preventDefault()
+      }}
+      onPointerDown={(e) => {
+        ;(window as Window & { __openSatchelTextToolbarPointerAt?: number })
+          .__openSatchelTextToolbarPointerAt = Date.now()
+        const target = e.target
+        if (
+          target instanceof Element &&
+          target.closest('select, input, textarea, option')
+        ) {
+          return
+        }
+        e.preventDefault()
+      }}
       data-testid="paragraph-context-toolbar"
     >
       {/* Alignment */}
@@ -1842,6 +3414,91 @@ function ParagraphContextToolbar({
         </button>
       ))}
       <div style={{ width: 1, height: 18, background: 'var(--border, #2a2f3a)' }} />
+      <button
+        type="button"
+        title="Bold"
+        onClick={() => onBold(!currentBold)}
+        data-testid="paragraph-context-bold"
+        style={{
+          width: 24,
+          height: 22,
+          fontSize: 13,
+          lineHeight: '20px',
+          fontWeight: 700,
+          background: currentBold ? 'var(--accent, #3b82f6)' : 'transparent',
+          color: currentBold ? '#fff' : 'var(--text-primary, #e6e8ec)',
+          border: 'none',
+          borderRadius: 3,
+          cursor: 'pointer',
+          padding: 0,
+        }}
+      >
+        B
+      </button>
+      <button
+        type="button"
+        title="Italic"
+        onClick={() => onItalic(!currentItalic)}
+        data-testid="paragraph-context-italic"
+        style={{
+          width: 24,
+          height: 22,
+          fontSize: 13,
+          lineHeight: '20px',
+          fontStyle: 'italic',
+          background: currentItalic ? 'var(--accent, #3b82f6)' : 'transparent',
+          color: currentItalic ? '#fff' : 'var(--text-primary, #e6e8ec)',
+          border: 'none',
+          borderRadius: 3,
+          cursor: 'pointer',
+          padding: 0,
+        }}
+      >
+        I
+      </button>
+      <button
+        type="button"
+        title="Underline"
+        onClick={() => onUnderline(!currentUnderline)}
+        data-testid="paragraph-context-underline"
+        style={{
+          width: 24,
+          height: 22,
+          fontSize: 13,
+          lineHeight: '20px',
+          textDecorationLine: 'underline',
+          background: currentUnderline ? 'var(--accent, #3b82f6)' : 'transparent',
+          color: currentUnderline ? '#fff' : 'var(--text-primary, #e6e8ec)',
+          border: 'none',
+          borderRadius: 3,
+          cursor: 'pointer',
+          padding: 0,
+        }}
+      >
+        U
+      </button>
+      <button
+        type="button"
+        title="Strikethrough"
+        onClick={() => onStrikethrough(!currentStrikethrough)}
+        data-testid="paragraph-context-strikethrough"
+        style={{
+          width: 24,
+          height: 22,
+          fontSize: 13,
+          lineHeight: '20px',
+          textDecorationLine: 'line-through',
+          background: currentStrikethrough ? 'var(--accent, #3b82f6)' : 'transparent',
+          color: currentStrikethrough ? '#fff' : 'var(--text-primary, #e6e8ec)',
+          border: 'none',
+          borderRadius: 3,
+          cursor: 'pointer',
+          padding: 0,
+        }}
+      >
+        S
+      </button>
+      <div style={{ width: 1, height: 18, background: 'var(--border, #2a2f3a)' }} />
       {/* Font size */}
       <select
         title="Font size"
@@ -1858,6 +3515,7 @@ function ParagraphContextToolbar({
           borderRadius: 3,
           cursor: 'pointer',
         }}
+        data-testid="paragraph-context-font-size"
       >
         {sizeOptions.map((s) => (
           <option key={s} value={s}>{s}pt</option>
@@ -2069,17 +3727,18 @@ function ResizeGrips({
   }
 
   const grip = (corner: GripCorner): React.CSSProperties => {
-    const SIZE = 10
+    const SIZE = 8
     const HALF = SIZE / 2
+    const GAP = 3
     // X position: left for nw/w/sw, right for ne/e/se, center for n/s.
     let cx = 0
-    if (corner === 'nw' || corner === 'w' || corner === 'sw') cx = left - HALF
-    else if (corner === 'ne' || corner === 'e' || corner === 'se') cx = left + width - HALF
+    if (corner === 'nw' || corner === 'w' || corner === 'sw') cx = left - SIZE - GAP
+    else if (corner === 'ne' || corner === 'e' || corner === 'se') cx = left + width + GAP
     else cx = left + width / 2 - HALF
     // Y position: top for nw/n/ne, bottom for sw/s/se, center for w/e.
     let cy = 0
-    if (corner === 'nw' || corner === 'n' || corner === 'ne') cy = top - HALF
-    else if (corner === 'sw' || corner === 's' || corner === 'se') cy = top + height - HALF
+    if (corner === 'nw' || corner === 'n' || corner === 'ne') cy = top - SIZE - GAP
+    else if (corner === 'sw' || corner === 's' || corner === 'se') cy = top + height + GAP
     else cy = top + height / 2 - HALF
     // Cursor: corners use diagonal, edges use orthogonal.
     let cursor: string
@@ -2093,13 +3752,13 @@ function ResizeGrips({
       top: cy,
       width: SIZE,
       height: SIZE,
-      borderRadius: 999,
-      background: '#fff',
-      border: '1.5px solid #89b4fa',
+      borderRadius: 2,
+      background: '#ffffff',
+      border: '1px solid #2563eb',
       cursor,
       zIndex: 21,
       pointerEvents: 'auto',
-      boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+      boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
     }
   }
 

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useFontStore, STANDARD_FONTS } from '../../stores/fontStore'
 import { useUIStore } from '../../stores/uiStore'
+import type { TextOptions } from '../../types/pdf'
 
 const FONT_FAMILIES: { label: string; fonts: string[] }[] = [
   {
@@ -22,7 +23,19 @@ const FONT_FAMILIES: { label: string; fonts: string[] }[] = [
   }
 ]
 
-export default function FontPicker() {
+type FontPickerProps = {
+  onTextFormatting?: (patch: Partial<TextOptions>) => void
+  markTextToolbarInteraction?: () => void
+}
+
+function fontOptionTestId(font: string): string {
+  return `font-picker-option-${font.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
+}
+
+export default function FontPicker({
+  onTextFormatting,
+  markTextToolbarInteraction,
+}: FontPickerProps = {}) {
   const [open, setOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const ref = useRef<HTMLDivElement>(null)
@@ -69,7 +82,9 @@ export default function FontPicker() {
   }, [open])
 
   const handleSelect = (fontFamily: string, customFontId?: string) => {
-    setTextOptions({ fontFamily, customFontId })
+    markTextToolbarInteraction?.()
+    if (onTextFormatting) onTextFormatting({ fontFamily, customFontId })
+    else setTextOptions({ fontFamily, customFontId })
     setOpen(false)
   }
 
@@ -83,9 +98,19 @@ export default function FontPicker() {
     <div ref={ref} style={{ position: 'relative' }}>
       <button
         ref={buttonRef}
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          markTextToolbarInteraction?.()
+          setOpen(!open)
+        }}
         // Don't pull focus from an in-edit Textbox.
-        onMouseDown={(e) => e.preventDefault()}
+        onPointerDown={(e) => {
+          markTextToolbarInteraction?.()
+          e.preventDefault()
+        }}
+        onMouseDown={(e) => {
+          markTextToolbarInteraction?.()
+          e.preventDefault()
+        }}
         data-testid="font-picker-button"
         style={{
           padding: '2px 6px',
@@ -111,7 +136,18 @@ export default function FontPicker() {
       </button>
 
       {open && menuPos && createPortal(
-        <div ref={menuRef} data-testid="font-picker-menu" style={{
+        <div
+          ref={menuRef}
+          data-testid="font-picker-menu"
+          onPointerDown={(e) => {
+            markTextToolbarInteraction?.()
+            e.preventDefault()
+          }}
+          onMouseDown={(e) => {
+            markTextToolbarInteraction?.()
+            e.preventDefault()
+          }}
+          style={{
           position: 'fixed',
           top: menuPos.top,
           left: menuPos.left,
@@ -138,6 +174,7 @@ export default function FontPicker() {
                   label={font.replace(/-/g, ' ')}
                   active={textOptions.fontFamily === font && !textOptions.customFontId}
                   onClick={() => handleSelect(font, undefined)}
+                  testId={fontOptionTestId(font)}
                 />
               ))}
             </div>
@@ -158,6 +195,7 @@ export default function FontPicker() {
                   active={textOptions.customFontId === f.id}
                   onClick={() => handleSelect(f.name, f.id)}
                   onRemove={() => fontStore.removeFont(f.id)}
+                  testId={fontOptionTestId(f.name)}
                 />
               ))}
             </>
@@ -167,6 +205,14 @@ export default function FontPicker() {
           <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
           <button
             onClick={handleImport}
+            onPointerDown={(e) => {
+              markTextToolbarInteraction?.()
+              e.preventDefault()
+            }}
+            onMouseDown={(e) => {
+              markTextToolbarInteraction?.()
+              e.preventDefault()
+            }}
             style={{
               display: 'block',
               width: '100%',
@@ -190,12 +236,13 @@ export default function FontPicker() {
   )
 }
 
-function FontOption({ font, label, active, onClick, onRemove }: {
+function FontOption({ font, label, active, onClick, onRemove, testId }: {
   font: string
   label: string
   active: boolean
   onClick: () => void
   onRemove?: () => void
+  testId?: string
 }) {
   return (
     <div
@@ -210,6 +257,7 @@ function FontOption({ font, label, active, onClick, onRemove }: {
         color: active ? '#1e1e2e' : 'var(--text-primary)',
         fontFamily: font
       }}
+      data-testid={testId}
       onClick={onClick}
       onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = 'var(--bg-hover)' }}
       onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = active ? 'var(--accent)' : 'transparent' }}

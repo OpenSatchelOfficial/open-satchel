@@ -5,6 +5,7 @@ import type {
   DrawingOptions,
   TextOptions,
   SaveNotice,
+  ConfirmDialogState,
   AccentName,
   LayoutMode,
   DensityName,
@@ -30,6 +31,7 @@ interface UIActions {
   setShapeStrokeWidth: (width: number) => void
   setNoteColor: (color: string) => void
   setSelectedStamp: (index: number) => void
+  setTextStampTemplate: (template: string) => void
   setInitials: (v: string) => void
   toggleSearch: () => void
   setSearchVisible: (v: boolean) => void
@@ -48,6 +50,8 @@ interface UIActions {
   setAutoSaveInterval: (ms: number) => void
   setAutoSaveStatus: (s: 'idle' | 'saving' | 'saved') => void
   toggleAutoSave: () => void
+  setAutoLayoutTextEdits: (v: boolean) => void
+  toggleAutoLayoutTextEdits: () => void
   toggleRulers: () => void
   toggleGrid: () => void
   toggleSnapToGrid: () => void
@@ -62,11 +66,39 @@ interface UIActions {
   // re-embedded (CMap/subset/license-locked). Mirrors Acrobat's
   // Preferences > Content Editing > "Fallback font for editing".
   setFallbackFont: (family: FallbackFontFamily) => void
+  // §3: when true, the overlay bake EMBEDS the installed file for
+  // office-suite family names (Arial/Calibri/Cambria/Georgia/…) on an
+  // EXACT system-font match instead of substituting Standard-14 metrics.
+  // Default OFF preserves the compact Standard-14 output; ON trades a
+  // larger file for exact installed-font fidelity. Exact-match-gated to
+  // avoid borrowing a wrong face on a fuzzy name match.
+  setEmbedInstalledFonts: (v: boolean) => void
+  // Optional metadata wipe on save (beside redactions). See UIState.wipeMetadataOnSave.
+  setWipeMetadataOnSave: (v: boolean) => void
+  toggleWipeMetadataOnSave: () => void
+  /** Legal Guarantee redaction (beside redactions). See
+   *  UIState.legalGuaranteeRedaction. Enabling it FORCE-DISABLES autosave
+   *  (remembering the prior setting); disabling restores it. The atomic
+   *  autosave lifecycle lives in this setter so every caller (checkbox
+   *  walkthrough, post-save toast, MCP ui_set_legal_guarantee) gets it. */
+  setLegalGuaranteeRedaction: (v: boolean) => void
   /** Density token. Accepts the v2 names (compact|balanced|roomy)
    *  AND the legacy ones (comfortable→balanced, spacious→roomy) so test
    *  scripts written against the old API keep working. */
   setDensity: (d: DensityName | 'comfortable' | 'spacious') => void
   setSaveNotice: (n: SaveNotice | null) => void
+  /** Show a blocking in-app confirmation and await the user's choice. Use
+   *  this instead of window.confirm (which WebView2 silently suppresses in the
+   *  packaged build). Resolves true on confirm, false on cancel/dismiss. */
+  requestConfirm: (opts: {
+    title: string
+    message: string
+    confirmLabel?: string
+    cancelLabel?: string
+    tone?: 'warn' | 'danger'
+  }) => Promise<boolean>
+  /** Resolve the pending confirm dialog (called by <ConfirmModal>). */
+  resolveConfirm: (ok: boolean) => void
 }
 
 export type FallbackFontFamily = 'Helvetica' | 'TimesRoman' | 'Courier'
@@ -149,6 +181,7 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
   shapeStrokeWidth: 2,
   noteColor: '#f9e2af',
   selectedStamp: 0,
+  textStampTemplate: 'Reviewed by {user} on {date}',
   initials: 'AB',
   searchVisible: false,
   // Redesign-v2 flips the default to light. Both themes are equally
@@ -171,6 +204,7 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
   // see follow-up task.
   autoSaveInterval: 120000,
   autoSaveStatus: 'idle',
+  autoLayoutTextEdits: false,
   showRulers: false,
   showGrid: false,
   showLayers: false,
@@ -179,9 +213,14 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
   gridSize: 50,
   guides: {},
   fallbackFontFamily: 'Helvetica' as FallbackFontFamily,
+  embedInstalledFonts: false,
+  wipeMetadataOnSave: false,
+  legalGuaranteeRedaction: false,
+  autoSaveBeforeLegalGuarantee: null,
   readMode: false,
   density: 'compact',
   saveNotice: null,
+  confirmDialog: null,
 
   setCurrentPage: (page) => set({ currentPage: page }),
   setReadMode: (read) => set({ readMode: read }),
@@ -211,6 +250,7 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
   setShapeStrokeWidth: (width) => set({ shapeStrokeWidth: width }),
   setNoteColor: (color) => set({ noteColor: color }),
   setSelectedStamp: (index) => set({ selectedStamp: index }),
+  setTextStampTemplate: (template) => set({ textStampTemplate: template }),
   setInitials: (v) => set({ initials: v }),
   toggleSearch: () => set((s) => ({ searchVisible: !s.searchVisible })),
   setSearchVisible: (v) => set({ searchVisible: v }),
@@ -248,6 +288,9 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
   setAutoSaveInterval: (ms) => set({ autoSaveInterval: ms }),
   setAutoSaveStatus: (s) => set({ autoSaveStatus: s }),
   toggleAutoSave: () => set((state) => ({ autoSaveEnabled: !state.autoSaveEnabled })),
+  setAutoLayoutTextEdits: (v) => set({ autoLayoutTextEdits: v }),
+  toggleAutoLayoutTextEdits: () =>
+    set((state) => ({ autoLayoutTextEdits: !state.autoLayoutTextEdits })),
   toggleRulers: () => set((state) => ({ showRulers: !state.showRulers })),
   toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
   toggleSnapToGrid: () => set((state) => ({ snapToGrid: !state.snapToGrid })),
@@ -292,6 +335,30 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
       return { guides: next }
     }),
   setFallbackFont: (family) => set({ fallbackFontFamily: family }),
+  setEmbedInstalledFonts: (v) => set({ embedInstalledFonts: v }),
+  setWipeMetadataOnSave: (v) => set({ wipeMetadataOnSave: v }),
+  toggleWipeMetadataOnSave: () => set((s) => ({ wipeMetadataOnSave: !s.wipeMetadataOnSave })),
+  setLegalGuaranteeRedaction: (v) =>
+    set((s) => {
+      if (v === s.legalGuaranteeRedaction) return {}
+      if (v) {
+        // Turning LG ON: remember the current autosave setting and force
+        // autosave OFF, so the destructive rasterize only ever commits on a
+        // deliberate manual save (undo/redo keep working until that save).
+        return {
+          legalGuaranteeRedaction: true,
+          autoSaveBeforeLegalGuarantee: s.autoSaveEnabled,
+          autoSaveEnabled: false,
+        }
+      }
+      // Turning LG OFF: restore the autosave setting captured when it was
+      // enabled (default ON if we never captured one).
+      return {
+        legalGuaranteeRedaction: false,
+        autoSaveEnabled: s.autoSaveBeforeLegalGuarantee ?? s.autoSaveEnabled,
+        autoSaveBeforeLegalGuarantee: null,
+      }
+    }),
   setDensity: (d) =>
     set(() => {
       const norm = normalizeDensity(d)
@@ -299,4 +366,26 @@ export const useUIStore = create<UIState & UIActions>((set, get) => ({
       return { density: norm }
     }),
   setSaveNotice: (n) => set({ saveNotice: n }),
+  requestConfirm: (opts) => {
+    // If a confirm is somehow already pending, resolve it false first so its
+    // awaiter doesn't hang.
+    const prev = get().confirmDialog
+    if (prev) prev.resolve(false)
+    return new Promise<boolean>((resolve) => {
+      const dialog: ConfirmDialogState = {
+        title: opts.title,
+        message: opts.message,
+        confirmLabel: opts.confirmLabel ?? 'Confirm',
+        cancelLabel: opts.cancelLabel ?? 'Cancel',
+        tone: opts.tone ?? 'warn',
+        resolve,
+      }
+      set({ confirmDialog: dialog })
+    })
+  },
+  resolveConfirm: (ok) => {
+    const cd = get().confirmDialog
+    set({ confirmDialog: null })
+    if (cd) cd.resolve(ok)
+  },
 }))

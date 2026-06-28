@@ -13,19 +13,6 @@ type OcrLanguage = { code: string; label: string }
 
 const LANGUAGES: OcrLanguage[] = [
   { code: 'eng', label: 'English' },
-  { code: 'fra', label: 'French' },
-  { code: 'deu', label: 'German' },
-  { code: 'spa', label: 'Spanish' },
-  { code: 'ita', label: 'Italian' },
-  { code: 'por', label: 'Portuguese' },
-  { code: 'nld', label: 'Dutch' },
-  { code: 'pol', label: 'Polish' },
-  { code: 'rus', label: 'Russian' },
-  { code: 'chi_sim', label: 'Chinese (Simplified)' },
-  { code: 'chi_tra', label: 'Chinese (Traditional)' },
-  { code: 'jpn', label: 'Japanese' },
-  { code: 'kor', label: 'Korean' },
-  { code: 'ara', label: 'Arabic' },
 ]
 
 export default function OcrDialog({ tabId, onClose }: Props) {

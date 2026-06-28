@@ -3,6 +3,7 @@ import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
 import type { PdfFormatState } from './index'
 import { executeWorkflow, PRESET_WORKFLOWS, type ActionStep, type ActionStepType, type ActionWorkflow } from '../../services/actionWizard'
+import { resolveWysiwygSecurityBytes } from '../../services/pdfSecurityFinalize'
 
 interface Props {
   tabId: string
@@ -85,7 +86,9 @@ export default function ActionWizardDialog({ tabId, onClose }: Props) {
     setProgress({ step: 0, total: workflow.steps.length, label: 'Starting…' })
     try {
       if (runMode === 'current') {
-        await runOne(`current document (${state.pdfBytes.byteLength.toLocaleString()} bytes)`, state.pdfBytes, true)
+        const hasSignStep = workflow.steps.some((step) => step.type === 'sign')
+        const sourceBytes = hasSignStep ? await resolveWysiwygSecurityBytes(tabId) : state.pdfBytes
+        await runOne(`current document (${sourceBytes.byteLength.toLocaleString()} bytes)`, sourceBytes, true)
       } else {
         // Multi-file: prompt for a folder selection. Browsers can't
         // iterate directories without <input type=file webkitdirectory>;
@@ -130,9 +133,12 @@ export default function ActionWizardDialog({ tabId, onClose }: Props) {
     const saved = await window.api.file.saveAs(result.outputBytes)
     if (saved) {
       setLog((l) => [...l, `  ✓ Saved ${outName} (${result.outputBytes.byteLength.toLocaleString()} bytes).`])
-      if (isCurrent && result.outputFormat === 'pdf') {
+      const workflowSigns = workflow.steps.some((step) => step.type === 'sign')
+      if (isCurrent && result.outputFormat === 'pdf' && !workflowSigns) {
         useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: result.outputBytes }))
         useTabStore.getState().setTabDirty(tabId, true)
+      } else if (isCurrent && workflowSigns) {
+        setLog((l) => [...l, '  Signed workflow output saved as a protected copy; original tab unchanged.'])
       }
     } else {
       setLog((l) => [...l, `  • ${fileName} output ready but save was cancelled.`])

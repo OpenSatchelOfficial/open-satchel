@@ -5,7 +5,8 @@
 // ParagraphEdit entries:
 //   - Source-page edit: bbox = sourceBbox, originalText = the moved
 //     text, newText = "" → engine paints a mask over the original
-//     glyphs (deletion, same shape S2 emits).
+//     glyphs. This is a fixed delete; moves do not opt into automatic
+//     gap-closing reflow.
 //   - Destination-page edit: bbox = toBbox, originalText = (empty —
 //     no Tj at this position), newText = moved text → engine's
 //     true-rewrite path can't find a Tj to surgically replace, so it
@@ -19,11 +20,11 @@
 // Path 2 (cross-page indirection via shared stream) is smaller but
 // less standard and offers no user-visible advantage; deferred.
 
-import type { ParagraphEdit } from './pdfParagraphEdits'
+import type { ParagraphEdit, StyledRun } from './pdfParagraphEdits'
 
 export interface ParagraphMove {
-  /** Stable id from the source paragraph cluster — used for reflow
-   *  bookkeeping on the source page. */
+  /** Stable id from the source paragraph cluster, used to mask the
+   *  source text at save time. */
   paragraphId: string
   /** 0-based page index the paragraph originated on. */
   fromPage: number
@@ -49,6 +50,7 @@ export interface ParagraphMove {
   italic?: boolean
   color?: string
   backgroundColor?: string
+  runs?: StyledRun[]
 }
 
 /** Expand a list of ParagraphMove into two ParagraphEdit entries
@@ -87,6 +89,7 @@ export function expandMovesToEdits(
         fontFamily: m.fontFamily,
         bold: m.bold,
         italic: m.italic,
+        ...(m.runs ? { runs: m.runs, requiresOverlay: true, styleChanged: true } : {}),
         positionDelta: { dx, dy },
       })
       continue
@@ -119,6 +122,7 @@ export function expandMovesToEdits(
       fontFamily: m.fontFamily,
       bold: m.bold,
       italic: m.italic,
+      ...(m.runs ? { runs: m.runs, requiresOverlay: true, styleChanged: true } : {}),
     })
   }
   return out

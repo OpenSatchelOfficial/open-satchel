@@ -32,7 +32,8 @@ to insulate Open Satchel from:
 
 ## Provenance audit
 
-Pre-vendor audit (2026-04-18) confirmed:
+Pre-vendor audit (2026-04-18, see `PARITY_GAP_REPORT.md` in the repo
+root) confirmed:
 
 - No malware, no obfuscation beyond the Closure-compiled `dist/*.min.js`.
 - No `postinstall` / `preinstall` scripts.
@@ -73,10 +74,7 @@ registers `globalThis.Zga`. See the loader file for specifics.
 If upstream ships a new version we want to adopt:
 
 1. `npm view zgapdfsigner@<new-version>` — check metadata.
-2. Re-audit using the same checklist as the original vendor pass
-   (malware / obfuscation scan, install scripts, network endpoints,
-   tarball hash equality with the GitHub source tag, reproducible
-   build of the minified bundle).
+2. Re-audit per the checklist in `PARITY_GAP_REPORT.md`.
 3. Download the tarball: `npm pack zgapdfsigner@<new-version>`.
 4. Diff the old `lib/*.js` against the new; read every changed line.
 5. If clean: `rm -rf vendor/zgapdfsigner/lib vendor/zgapdfsigner/dist`

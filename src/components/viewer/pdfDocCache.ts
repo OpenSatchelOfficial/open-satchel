@@ -75,3 +75,37 @@ export async function releasePdfDoc(pdfBytes: Uint8Array): Promise<void> {
     /* parse failed — nothing to destroy */
   }
 }
+
+/// Guarded release for the SAVE / UNDO generation-swap path (I-2b).
+///
+/// updateFormatState / setFormatState replace state.pdfBytes with a NEW
+/// Uint8Array, but the displaced prior reference is still the WeakMap key
+/// for a live pdfjs worker doc. clearFormatState (the R15 close-fix) only
+/// covers tab close — so without this, every committing save and every
+/// undo/redo that crosses a save generation orphans ~one 33 MB pdfjs
+/// parse in the worker (gauntlet-installed I-2b).
+///
+/// Frees the orphaned worker doc for `bytes`, but ONLY when no live tab
+/// still holds that exact reference as its current pdfBytes — the caller
+/// supplies that identity predicate. getPdfDoc is only ever called on a
+/// tab's live state.pdfBytes, and history snapshots reference an
+/// immutable copy that is never handed to getPdfDoc, so "no tab
+/// references it" == "safe to destroy".
+///
+/// Deferred one macrotask so the new-bytes render commits and the old
+/// render effects run their `cancelled` teardown before we destroy(): a
+/// destroy racing an in-flight pdfjs render only aborts that render (the
+/// rejection is swallowed by every caller, and getPdfDoc re-parses on the
+/// next request) — it never crashes or leaves a persistently blank page.
+/// The guard is re-checked inside the deferral in case state swapped
+/// again (e.g. an undo restored this very generation) during the delay.
+export function releasePdfDocIfUnreferenced(
+  bytes: Uint8Array,
+  isStillReferenced: (bytes: Uint8Array) => boolean,
+): void {
+  if (!cache.has(bytes)) return
+  setTimeout(() => {
+    if (isStillReferenced(bytes)) return
+    void releasePdfDoc(bytes)
+  }, 0)
+}

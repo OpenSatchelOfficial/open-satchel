@@ -36,7 +36,10 @@ import {
 import { readBookmarks, writeFlatBookmarks, type Bookmark } from '../../services/pdfBookmarks'
 import { findAcrossPages, replaceAcrossPages, spellCheckPages, readPageAloud, stopReading } from '../../services/pdfTextOps'
 import { comparePdfs } from '../../services/pdfCompare'
-import { generateSelfSignedCert, signPdf, listSignatures, type CertIdentity } from '../../services/pdfSign'
+import { resolveOutputBytes } from '../../services/pdfPrint'
+import { stateHasManualRedactions } from '../../services/pdfManualRedactions'
+import { generateSelfSignedCert, listSignatures, type CertIdentity } from '../../services/pdfSign'
+import { finalizeSecurityCopy } from '../../services/pdfSecurityFinalize'
 
 interface Props {
   tabId: string
@@ -117,11 +120,11 @@ export default function PdfAdvancedDialog({ tabId, onClose }: Props) {
             {section === 'thumbnail' && <ThumbnailSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'organize' && <OrganizeSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'pages' && <PagesSection state={state} tabId={tabId} onStatus={setStatus} />}
-            {section === 'convert' && <ConvertSection state={state} onStatus={setStatus} />}
+            {section === 'convert' && <ConvertSection tabId={tabId} onStatus={setStatus} />}
             {section === 'bookmarks' && <BookmarksSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'text' && <TextSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'highlights' && <HighlightsSection state={state} onStatus={setStatus} />}
-            {section === 'compare' && <CompareSection state={state} onStatus={setStatus} />}
+            {section === 'compare' && <CompareSection tabId={tabId} onStatus={setStatus} />}
             {section === 'sign' && <SignSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'optimize' && <OptimizeSection state={state} tabId={tabId} onStatus={setStatus} />}
             {section === 'pagelabels' && <PageLabelsSection state={state} tabId={tabId} onStatus={setStatus} />}
@@ -204,7 +207,8 @@ function OrganizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
   const [rotateAll, setRotateAll] = useState<90 | 180 | 270>(90)
 
   const doSplit = async () => {
-    const chunks = await splitEveryN(state.pdfBytes, n)
+    // GATE 3: bake pending redactions before exporting split chunks.
+    const chunks = await splitEveryN(await resolveOutputBytes(tabId), n)
     for (let i = 0; i < chunks.length; i++) await downloadBytes(`split-${i + 1}.pdf`, chunks[i])
     onStatus(`Split into ${chunks.length} files (downloaded).`)
   }
@@ -221,7 +225,8 @@ function OrganizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
     onStatus(`Rotated all pages ${rotateAll}° on the saved bytes.`)
   }
   const doFlatten = async () => {
-    const flat = await flattenForm(state.pdfBytes)
+    // GATE 3: bake pending redactions before exporting the flattened copy.
+    const flat = await flattenForm(await resolveOutputBytes(tabId))
     await downloadBytes('flattened.pdf', flat)
     onStatus('Form fields flattened (downloaded).')
   }
@@ -252,8 +257,12 @@ function OrganizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
   )
 }
 
-function ConvertSection({ state, onStatus }: { state: PdfFormatState; onStatus: (s: string) => void }) {
+function ConvertSection({ tabId, onStatus }: { tabId: string; onStatus: (s: string) => void }) {
   const [scale, setScale] = useState(2)
+  // GATE 3: every conversion reads the redaction-aware output bytes, NOT
+  // state.pdfBytes — pending manual redaction marks are baked in first so an
+  // export can never ship the un-redacted secret (verbatim in data exports, or
+  // in the clear pixels of an image render). resolveOutputBytes is fail-closed.
   // Wrap every conversion in try/catch so a thrown error surfaces in
   // the dialog status. Pre-fix, pdfToPpt could blow the stack on
   // multi-page PDFs (chunked btoa fix in services/pdfConvert.ts) and
@@ -267,41 +276,41 @@ function ConvertSection({ state, onStatus }: { state: PdfFormatState; onStatus: 
     }
   }
   const toWord = () => guard('PDF→Word', async () => {
-    const bytes = await pdfToWord(state.pdfBytes)
+    const bytes = await pdfToWord(await resolveOutputBytes(tabId))
     await downloadBytes('converted.docx', bytes, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     onStatus(`PDF→Word exported (${bytes.byteLength} bytes).`)
   })
   const toExcel = () => guard('PDF→Excel', async () => {
-    const bytes = await pdfToExcel(state.pdfBytes)
+    const bytes = await pdfToExcel(await resolveOutputBytes(tabId))
     await downloadBytes('converted.xlsx', bytes, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     onStatus(`PDF→Excel exported (${bytes.byteLength} bytes).`)
   })
   const toPpt = () => guard('PDF→PPT', async () => {
-    const bytes = await pdfToPpt(state.pdfBytes)
+    const bytes = await pdfToPpt(await resolveOutputBytes(tabId))
     await downloadBytes('converted.pptx', bytes, 'application/vnd.openxmlformats-officedocument.presentationml.presentation')
     onStatus(`PDF→PPT exported (${bytes.byteLength} bytes).`)
   })
   const toTxt = () => guard('PDF→TXT', async () => {
-    const text = await pdfToText(state.pdfBytes)
+    const text = await pdfToText(await resolveOutputBytes(tabId))
     const blob = new Uint8Array(new TextEncoder().encode(text))
     await downloadBytes('converted.txt', blob, 'text/plain')
     onStatus(`PDF→TXT exported (${blob.byteLength} bytes).`)
   })
-  const toImages = async () => {
-    const imgs = await pdfToImages(state.pdfBytes, { scale })
+  const toImages = () => guard('PDF→Images', async () => {
+    const imgs = await pdfToImages(await resolveOutputBytes(tabId), { scale })
     for (let i = 0; i < imgs.length; i++) await downloadBytes(`page-${i + 1}.png`, imgs[i], 'image/png')
     onStatus(`Exported ${imgs.length} PNGs.`)
-  }
-  const toImageOnly = async () => {
-    const bytes = await toImageOnlyPdf(state.pdfBytes)
+  })
+  const toImageOnly = () => guard('To Image-only PDF', async () => {
+    const bytes = await toImageOnlyPdf(await resolveOutputBytes(tabId))
     await downloadBytes('image-only.pdf', bytes)
     onStatus(`Image-only PDF exported (text now unselectable).`)
-  }
-  const extractPics = async () => {
-    const pics = await extractAllPictures(state.pdfBytes, { scale: 2 })
+  })
+  const extractPics = () => guard('Extract Pictures', async () => {
+    const pics = await extractAllPictures(await resolveOutputBytes(tabId), { scale: 2 })
     for (let i = 0; i < pics.length; i++) await downloadBytes(`picture-${i + 1}.png`, pics[i], 'image/png')
     onStatus(`Extracted ${pics.length} picture(s).`)
-  }
+  })
   const imagesToPdfFromPicker = async () => {
     const input = document.createElement('input')
     input.type = 'file'; input.accept = 'image/png,image/jpeg'; input.multiple = true
@@ -457,11 +466,22 @@ function SignSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
   }
   const sign = async () => {
     if (!cert) { onStatus('Generate a cert first.'); return }
-    const bytes = await signPdf(state.pdfBytes, cert.p12, cert.passphrase, { reason, location, signerName: cn })
-    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: bytes }))
-    useTabStore.getState().setTabDirty(tabId, true)
-    setSigs(await listSignatures(bytes))
-    onStatus(`Document signed by "${cn}".`)
+    const tab = useTabStore.getState().tabs.find((t) => t.id === tabId)
+    const base = (tab?.fileName || 'document.pdf').replace(/\.pdf$/i, '')
+    const result = await finalizeSecurityCopy(tabId, {
+      kind: 'sign',
+      p12: cert.p12,
+      passphrase: cert.passphrase,
+      signOptions: { reason: reason || undefined, location: location || undefined, signerName: cn || undefined },
+      suggestedName: `${base}-signed.pdf`,
+    })
+    if (result.path) {
+      onStatus(`Signed copy created for "${cn}". Original tab is unchanged.`)
+      const actions = await import('../../lib/actions')
+      await actions.openFromPath(result.path)
+    } else {
+      onStatus('Signed bytes were created, but Save As was canceled. Original tab is unchanged.')
+    }
   }
   const downloadP12 = async () => {
     if (!cert) return
@@ -476,7 +496,7 @@ function SignSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
   return (
     <div data-testid="section-sign">
       <h4 style={{ marginTop: 0, fontSize: 13 }}>Digital Signature (Self-Signed)</h4>
-      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Generate a free self-signed certificate on your device and sign the PDF. Adobe Reader will show the signature as "valid but untrusted" (no CA chain).</div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Generate a free self-signed certificate on your device and create a signed copy. The original tab remains editable. Adobe Reader will show the signature as "valid but untrusted" (no CA chain).</div>
 
       <label style={label}>Common Name (signer)</label><input data-testid="sign-cn" style={inp} value={cn} onChange={(e) => setCn(e.target.value)} />
       <label style={{ ...label, marginTop: 8 }}>Organization (optional)</label><input data-testid="sign-org" style={inp} value={org} onChange={(e) => setOrg(e.target.value)} />
@@ -485,7 +505,7 @@ function SignSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
 
       <div style={row}>
         <button data-testid="sign-gen" style={btnSecondary} onClick={gen}>{cert ? 'Regenerate cert' : 'Generate cert'}</button>
-        <button data-testid="sign-sign" style={btn} onClick={sign} disabled={!cert}>Sign document</button>
+        <button data-testid="sign-sign" style={btn} onClick={sign} disabled={!cert}>Create signed copy</button>
         {cert && <button data-testid="sign-download" style={btnSecondary} onClick={downloadP12}>Download cert bundle</button>}
       </div>
 
@@ -584,7 +604,7 @@ function TextSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
   )
 }
 
-function CompareSection({ state, onStatus }: { state: PdfFormatState; onStatus: (s: string) => void }) {
+function CompareSection({ tabId, onStatus }: { tabId: string; onStatus: (s: string) => void }) {
   const [result, setResult] = useState<null | { pages: number; inserted: number; deleted: number; similarity: number }>(null)
   const pickAndCompare = () => {
     const input = document.createElement('input')
@@ -593,7 +613,8 @@ function CompareSection({ state, onStatus }: { state: PdfFormatState; onStatus: 
       const file = input.files?.[0]
       if (!file) return
       const other = new Uint8Array(await file.arrayBuffer())
-      const r = await comparePdfs(state.pdfBytes, other)
+      // GATE 3: redacted text must not leak into the diff/similarity report.
+      const r = await comparePdfs(await resolveOutputBytes(tabId), other)
       setResult({ pages: r.pages.length, inserted: r.summary.inserted, deleted: r.summary.deleted, similarity: r.summary.similarity })
       onStatus(`Compared: ${Math.round(r.summary.similarity * 100)}% similar · +${r.summary.inserted} / −${r.summary.deleted} lines`)
     }
@@ -628,6 +649,13 @@ function ThumbnailSection({ state, tabId, onStatus }: { state: PdfFormatState; t
   }
 
   const useSelectedPage = async () => {
+    // GATE 3: a thumbnail rendered from a page is EMBEDDED in the doc and would
+    // outlive a later content redaction (it's a separate image stream). Refuse
+    // while marks are pending so we never bake an un-redacted page preview.
+    if (stateHasManualRedactions(state)) {
+      onStatus('Apply or save your redactions before setting a thumbnail from a page — otherwise the embedded thumbnail would still show the un-redacted page.')
+      return
+    }
     const bytes = await setPdfThumbnailFromPage(state.pdfBytes, sourcePage - 1, coverMode)
     // Also grab that page as a preview image for the UI
     const imgs = await pdfToImages(state.pdfBytes, { scale: 1 })

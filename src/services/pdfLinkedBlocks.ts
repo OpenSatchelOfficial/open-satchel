@@ -7,9 +7,10 @@
 // flow (they're preserved in `chain.text` so a later resize / new
 // frame restores them).
 //
-// Foxit and Acrobat don't have this, but it's table stakes in
-// InDesign / Affinity Publisher / QuarkXPress. Worth shipping even
-// before the UX is polished because the engine seam is the gate.
+// PARITY.md flags this as the Foxit-killer differentiator — Foxit
+// + Acrobat both don't have it, but it's table stakes in InDesign /
+// Affinity Publisher / QuarkXPress. Worth shipping even before the
+// UX is polished because the engine seam is the gate.
 //
 // Architecture:
 //   1. Pure flow algorithm (this file) takes the chain definition
@@ -76,6 +77,21 @@ export interface FrameSegment {
   overflow: boolean
 }
 
+/** Flow result + the overflow that did NOT fit any frame. Session 6
+ *  (epic deliverable 3): the trailing characters past the last frame
+ *  used to vanish silently — `flowTextThroughChain` only set an
+ *  `overflow` flag nobody read. This report surfaces the dropped text
+ *  so the save path can record a `linked.overflow_dropped` degradation
+ *  (fidelity) instead of losing characters quietly. */
+export interface FlowReport {
+  segments: FrameSegment[]
+  /** Verbatim text that overflowed the last frame (whitespace
+   *  preserved — the flow splits on `/(\s+)/` keeping separators, so
+   *  joining the remainder reconstructs the original tail exactly).
+   *  Empty string when everything fit. */
+  droppedText: string
+}
+
 /** Flow text through a chain, splitting at word boundaries.
  *
  *  Returns one segment per frame in the chain. If the text fits in
@@ -97,6 +113,17 @@ export function flowTextThroughChain(
   chain: LinkedChain,
   measure: MeasureTextWidth,
 ): FrameSegment[] {
+  return flowTextThroughChainWithReport(chain, measure).segments
+}
+
+/** Same flow algorithm as {@link flowTextThroughChain}, but also
+ *  returns the overflow text that did not fit any frame so the caller
+ *  can record a degradation instead of dropping characters silently
+ *  (Session 6, epic deliverable 3). */
+export function flowTextThroughChainWithReport(
+  chain: LinkedChain,
+  measure: MeasureTextWidth,
+): FlowReport {
   const remaining: string[] = chain.text.split(/(\s+)/) // keep whitespace
   const segments: FrameSegment[] = []
   let cursor = 0
@@ -155,13 +182,17 @@ export function flowTextThroughChain(
   }
 
   // If the loop exited with text left over and we used the last
-  // frame, mark its segment as overflow.
+  // frame, mark its segment as overflow AND surface the dropped tail.
+  // Whitespace is preserved by the split, so joining the remainder
+  // reconstructs the original overflow text verbatim.
+  let droppedText = ''
   if (cursor < remaining.length && segments.length > 0) {
     const last = segments[segments.length - 1]
     last.overflow = true
+    droppedText = remaining.slice(cursor).join('')
   }
 
-  return segments
+  return { segments, droppedText }
 }
 
 /** Convert a flowed chain into ParagraphEdit entries the bake

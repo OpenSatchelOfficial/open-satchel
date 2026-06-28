@@ -81,6 +81,54 @@ const SCRIPT_TO_LANG: Record<string, string> = {
   Thai: 'eng',
 }
 
+const BUNDLED_OCR_LANGUAGES = new Set(['eng'])
+
+function tesseractWorkerOptions({
+  legacy = false,
+  logger,
+}: {
+  legacy?: boolean
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  logger?: (message: any) => void
+} = {}): Record<string, unknown> {
+  const variant = legacy ? '4.0.0' : '4.0.0_best_int'
+  return {
+    workerPath: '/tesseract/worker.min.js',
+    corePath: '/tesseract/core',
+    langPath: `/tesseract/lang/${variant}`,
+    cachePath: `open-satchel-tessdata-${variant}`,
+    workerBlobURL: false,
+    gzip: true,
+    legacyCore: legacy,
+    legacyLang: legacy,
+    ...(logger ? { logger } : {}),
+  }
+}
+
+function flattenResultWords(resultData: any): Array<{
+  text: string
+  confidence?: number
+  bbox: { x0: number; y0: number; x1: number; y1: number }
+}> | undefined {
+  if (Array.isArray(resultData.words)) return resultData.words
+  if (!Array.isArray(resultData.blocks)) return undefined
+  const out: Array<{
+    text: string
+    confidence?: number
+    bbox: { x0: number; y0: number; x1: number; y1: number }
+  }> = []
+  for (const block of resultData.blocks) {
+    for (const para of block?.paragraphs ?? []) {
+      for (const line of para?.lines ?? []) {
+        for (const word of line?.words ?? []) {
+          if (word?.text && word?.bbox) out.push(word)
+        }
+      }
+    }
+  }
+  return out.length > 0 ? out : undefined
+}
+
 /** Rough deskew via projection-profile variance. Tries rotations in a
  *  narrow range (±5°) and picks the one whose horizontal projection
  *  histogram has the highest variance — a well-aligned text page has
@@ -147,17 +195,15 @@ function projectionSkew(canvas: OffscreenCanvas): number {
  *  back silently if the OSD model isn't available — it's only needed
  *  for auto-rotate + auto-lang. */
 async function detectOrientationAndScript(
-  imageData: ImageData,
+  image: OffscreenCanvas,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Tesseract: any,
 ): Promise<{ rotation: 0 | 90 | 180 | 270; script: string | null }> {
   try {
-    // PSM 0 = OSD only. With default eng language + LSTM it still does
-    // OSD because osd.traineddata is bundled.
-    const result = await Tesseract.recognize(imageData as unknown as ImageData, 'osd', {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tessedit_pageseg_mode: 0,
-    } as unknown as Record<string, unknown>)
+    const result = await Tesseract.detect(
+      image as unknown as HTMLCanvasElement,
+      tesseractWorkerOptions({ legacy: true }),
+    )
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const osd = (result.data as any).osd
     // Orientation is sometimes a prose string in `osd`. Parse it.
@@ -170,7 +216,13 @@ async function detectOrientationAndScript(
         rot === 90 || rot === 180 || rot === 270 ? rot : 0
       return { rotation: normalized, script }
     }
-    return { rotation: 0, script: null }
+    const degrees = Number((result.data as any).orientation_degrees ?? 0)
+    const normalized: 0 | 90 | 180 | 270 =
+      degrees === 90 || degrees === 180 || degrees === 270 ? degrees : 0
+    const script = typeof (result.data as any).script === 'string'
+      ? (result.data as any).script
+      : null
+    return { rotation: normalized, script }
   } catch {
     return { rotation: 0, script: null }
   }
@@ -262,14 +314,13 @@ export async function runOcr(
       const smallH = Math.round((smallW / canvas.width) * canvas.height)
       const small = new OffscreenCanvas(smallW, smallH)
       small.getContext('2d')!.drawImage(canvas, 0, 0, smallW, smallH)
-      const smallData = small.getContext('2d')!.getImageData(0, 0, smallW, smallH)
-      const osd = await detectOrientationAndScript(smallData, Tesseract)
+      const osd = await detectOrientationAndScript(small, Tesseract)
       if (opts.autoRotate && osd.rotation !== 0) {
         canvas = rotate90(canvas, osd.rotation)
       }
       if (opts.autoDetectLanguage && osd.script && SCRIPT_TO_LANG[osd.script]) {
         const mapped = SCRIPT_TO_LANG[osd.script]
-        if (mapped !== opts.language) detectedLanguage = mapped
+        if (mapped !== opts.language && BUNDLED_OCR_LANGUAGES.has(mapped)) detectedLanguage = mapped
       }
     }
 
@@ -280,11 +331,12 @@ export async function runOcr(
     }
 
     const effectiveLang = detectedLanguage ?? opts.language
-    const imageData = canvas.getContext('2d')!.getImageData(0, 0, canvas.width, canvas.height)
-
+    if (!BUNDLED_OCR_LANGUAGES.has(effectiveLang)) {
+      throw new Error(`OCR language "${effectiveLang}" is not bundled in this beta. English (eng) is available locally.`)
+    }
     onProgress?.({ step: 'recognize', pageIndex: i, totalPages, pct: (i + 0.4) / totalPages, statusText: `Recognizing page ${i + 1} (${effectiveLang})…` })
 
-    const result = await Tesseract.recognize(imageData as unknown as ImageData, effectiveLang, {
+    const worker = await Tesseract.createWorker(effectiveLang, Tesseract.OEM?.LSTM_ONLY ?? 1, tesseractWorkerOptions({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       logger: (m: any) => {
         if (m.status === 'recognizing text') {
@@ -292,7 +344,17 @@ export async function runOcr(
           onProgress?.({ step: 'recognize', pageIndex: i, totalPages, pct, statusText: `Recognizing page ${i + 1}: ${Math.round(m.progress * 100)}%` })
         }
       },
-    })
+    }))
+    let result: any
+    try {
+      result = await worker.recognize(
+        canvas as unknown as HTMLCanvasElement,
+        {},
+        { text: true, blocks: true },
+      )
+    } finally {
+      await worker.terminate()
+    }
 
     // Text assembly — preserve layout via block/para/line/word structure
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -329,13 +391,13 @@ export async function runOcr(
     }
 
     // Word-level bbox collection for searchable mode + suspects
-    const words0 = resultData.words as Array<{
+    const words0 = flattenResultWords(resultData) as Array<{
       text: string; confidence?: number
       bbox: { x0: number; y0: number; x1: number; y1: number }
     }> | undefined
     if (words0) {
       for (const w of words0) {
-        if (opts.outputMode === 'searchable' && w.text.trim()) {
+        if (w.text.trim()) {
           if (ocrPageData[ocrPageData.length - 1]?.pageNum !== pageNum) {
             ocrPageData.push({ pageNum, words: [], vpWidth: viewport.width / scale, vpHeight: viewport.height / scale })
           }

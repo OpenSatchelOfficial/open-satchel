@@ -177,7 +177,7 @@ export default function PageRendererLight({
   // hits the freshly mounted full PageRenderer's Fabric.
   const ANNOTATION_TOOLS = new Set([
     'text', 'image', 'sticky_note', 'highlight', 'highlight_area',
-    'underline', 'strikethrough', 'redact', 'shape_rect', 'shape_circle',
+    'underline', 'strikethrough', 'mark_redaction', 'redact', 'shape_rect', 'shape_circle',
     'shape_line', 'shape_arrow', 'stamp', 'wipe_off', 'textbox_note',
     'link', 'draw', 'signature',
   ])

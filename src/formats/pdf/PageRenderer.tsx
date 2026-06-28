@@ -263,7 +263,7 @@ export default function PageRenderer({
           pageHeight={dimensions.height}
         />
       )}
-      {/* Modeless-editing architecture.
+      {/* Modeless-editing architecture (docs/MODELESS.md Phases A+C).
           Both interactive layers stay mounted regardless of the
           current tool. FabricCanvas is ALWAYS interactive now — even
           in Edit Text mode. Phase C: the FabricCanvas internally
@@ -272,7 +272,7 @@ export default function PageRenderer({
           remain clickable. Combined with paragraph boxes sitting
           above Fabric (zIndex 5 vs 1) with their own pointer-events:
           auto regions, the natural z-order gives us the priority
-          table automatically:
+          table from docs/MODELESS.md automatically:
              Edit Text: paragraph box (top-z) > Fabric object > empty
              Select:    Fabric object > paragraph box > empty
                         (select mode: paragraph outlines hidden,
@@ -295,7 +295,7 @@ export default function PageRenderer({
           pdfDoc={pdfDoc}
           width={dimensions.width}
           height={dimensions.height}
-          active={!readMode && tool === 'edit_text'}
+          active={!readMode && (tool === 'edit_text' || tool === 'text' || tool === 'mark_redaction')}
           renderReady={renderReadyForCurrentDoc}
         />
       )}
@@ -310,7 +310,8 @@ export default function PageRenderer({
           pdfDoc={pdfDoc}
           width={dimensions.width}
           height={dimensions.height}
-          active={!readMode && tool === 'edit_image'}
+          active={!readMode && (tool === 'edit_image' || tool === 'mark_redaction')}
+          markRedactionMode={tool === 'mark_redaction'}
           renderReady={renderReadyForCurrentDoc}
         />
       )}

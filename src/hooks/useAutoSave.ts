@@ -1,7 +1,17 @@
 import { useEffect, useRef } from 'react'
 import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
+import { useFormatStore } from '../stores/formatStore'
 import { saveTabById } from '../App'
+import { stateHasManualRedactions } from '../services/pdfManualRedactions'
+
+export function isParagraphEditorActive(): boolean {
+  if (typeof document === 'undefined') return false
+  const active = document.activeElement as HTMLElement | null
+  if (active?.isContentEditable && active.closest('[data-paragraph-id]')) return true
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-paragraph-id]'))
+    .some((el) => el.isContentEditable && el.matches(':focus'))
+}
 
 export function useAutoSave(): void {
   const autoSaveEnabled = useUIStore((s) => s.autoSaveEnabled)
@@ -13,20 +23,26 @@ export function useAutoSave(): void {
 
     const timer = setInterval(async () => {
       if (savingRef.current) return
+      if (isParagraphEditorActive()) return
       savingRef.current = true
 
       try {
         const { tabs } = useTabStore.getState()
         const dirtyTabsWithPaths = tabs.filter((t) => t.isDirty && t.filePath)
+        const safeDirtyTabsWithPaths = dirtyTabsWithPaths.filter((tab) => {
+          if (tab.format !== 'pdf') return true
+          const state = useFormatStore.getState().data[tab.id]
+          return !stateHasManualRedactions(state as any)
+        })
 
-        if (dirtyTabsWithPaths.length === 0) {
+        if (safeDirtyTabsWithPaths.length === 0) {
           savingRef.current = false
           return
         }
 
         useUIStore.getState().setAutoSaveStatus('saving')
 
-        for (const tab of dirtyTabsWithPaths) {
+        for (const tab of safeDirtyTabsWithPaths) {
           await saveTabById(tab.id)
         }
 

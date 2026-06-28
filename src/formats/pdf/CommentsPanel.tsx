@@ -5,6 +5,7 @@ import { useTabStore } from '../../stores/tabStore'
 import type { PdfFormatState } from './index'
 import { listComments, groupIntoThreads, generateCommentsSummaryPdf, exportCommentsAsCsv, exportCommentsAsRtf, exportCommentsAsJson, type Comment } from '../../services/pdfComments'
 import { exportCommentsAsXfdf, downloadXfdf, importXfdfComments } from '../../services/pdfFdf'
+import { stickyNotePreviewText } from '../../components/editor/StickyNoteTool'
 
 interface Props {
   tabId: string
@@ -167,26 +168,66 @@ export default function CommentsPanel({ tabId }: Props) {
     useTabStore.getState().setTabDirty(tabId, true)
   }
 
-  /** Commit a reply as a new text-bearing fabric object on the same page,
-   *  linked via __parentId to the thread root. */
+  const updateCommentBody = (c: Comment, body: string) => {
+    useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => {
+      const pages = prev.pages.map((p) => {
+        if (p.pageIndex !== c.pageIndex && !((prev.pages.filter((pp) => !pp.deleted)[c.pageIndex]?.pageIndex === p.pageIndex))) return p
+        const fj = p.fabricJSON as { objects?: Array<Record<string, unknown>> } | null
+        if (!fj?.objects) return p
+        const nextObjs = fj.objects.map((obj, idx) => {
+          if (idx !== c.objectIndex) return obj
+          const type = String(obj.type ?? '').toLowerCase()
+          const isSticky = obj.__isStickyNote || obj.__kind === 'sticky_note'
+          const stickyPreview = isSticky ? stickyNotePreviewText(body) : ''
+          const stickyPreviewHeight = Math.max(13, stickyPreview.split(/\r?\n/).length * 13.4)
+          return {
+            ...obj,
+            ...(type === 'textbox' || type === 'text' || type === 'i-text'
+              ? {
+                  text: isSticky ? stickyPreview : body,
+                  fill: isSticky ? (body.trim() ? '#2f2500' : '#7a641d') : obj.fill,
+                  fontStyle: isSticky ? (body.trim() ? 'normal' : 'italic') : obj.fontStyle,
+                  height: isSticky ? stickyPreviewHeight : obj.height,
+                }
+              : {}),
+            ...(isSticky && Array.isArray(obj.objects)
+              ? {
+                  objects: obj.objects.map((child) => {
+                    if (!child || typeof child !== 'object') return child
+                    const childObj = child as Record<string, unknown>
+                    const childType = String(childObj.type ?? '').toLowerCase()
+                    if (childType !== 'textbox' && childType !== 'text' && childType !== 'i-text') return childObj
+                    return {
+                      ...childObj,
+                      text: stickyPreview,
+                      fill: body.trim() ? '#2f2500' : '#7a641d',
+                      fontStyle: body.trim() ? 'normal' : 'italic',
+                      height: stickyPreviewHeight,
+                    }
+                  }),
+                }
+              : {}),
+            __contents: body,
+          }
+        })
+        return { ...p, fabricJSON: { ...fj, objects: nextObjs } }
+      })
+      return { ...prev, pages }
+    })
+    useTabStore.getState().setTabDirty(tabId, true)
+  }
+
+  /** Commit a reply into the parent comment thread metadata. Replies are
+   *  shown in the Comments panel and intentionally do not create page
+   *  objects. */
   const commitReply = (root: Comment) => {
     if (!replyText.trim()) { setReplyingTo(null); setReplyText(''); return }
     const replyObj = {
-      type: 'textbox',
-      text: replyText,
-      left: (root.x ?? 20) + 20,
-      top: (root.y ?? 20) + 20,
-      fontSize: 12,
-      fill: root.color ?? '#89b4fa',
-      width: 200,
-      editable: false,
-      selectable: true,
-      __author: 'You',
-      __createdAt: Date.now(),
-      __id: `reply_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-      __parentId: root.id,
-      __kind: 'textbox_note',
-      __isComment: true,
+      id: `reply_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      body: replyText,
+      author: 'You',
+      createdAt: Date.now(),
+      status: 'open' as NonNullable<Comment['status']>,
     }
     useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => {
       const visible = prev.pages.filter((p) => !p.deleted)
@@ -195,7 +236,12 @@ export default function CommentsPanel({ tabId }: Props) {
       const pages = prev.pages.map((p) => {
         if (p.pageIndex !== actualPage.pageIndex) return p
         const fj = (p.fabricJSON as { version?: string; objects?: Array<Record<string, unknown>> } | null) ?? { version: '6.4.0', objects: [] }
-        return { ...p, fabricJSON: { ...fj, objects: [...(fj.objects ?? []), replyObj] } }
+        const nextObjs = (fj.objects ?? []).map((obj, idx) => {
+          if (idx !== root.objectIndex) return obj
+          const replies = Array.isArray(obj.__replies) ? obj.__replies : []
+          return { ...obj, __replies: [...replies, replyObj] }
+        })
+        return { ...p, fabricJSON: { ...fj, objects: nextObjs } }
       })
       return { ...prev, pages }
     })
@@ -296,13 +342,26 @@ export default function CommentsPanel({ tabId }: Props) {
                   <option value="cancelled">Cancelled</option>
                 </select>
               </div>
-              {t.root.body && (
-                <div style={{
-                  fontSize: 10, color: 'var(--text-primary)',
-                  maxHeight: 60, overflow: 'hidden', textOverflow: 'ellipsis',
-                  whiteSpace: 'pre-wrap',
-                }}>{t.root.body}</div>
-              )}
+              <textarea
+                data-testid={`cmt-body-${i}`}
+                value={t.root.body}
+                onChange={(e) => updateCommentBody(t.root, e.target.value)}
+                placeholder="Add a note..."
+                style={{
+                  width: '100%',
+                  minHeight: 46,
+                  maxHeight: 110,
+                  resize: 'vertical',
+                  fontSize: 10,
+                  lineHeight: 1.35,
+                  padding: '4px 5px',
+                  color: 'var(--text-primary)',
+                  background: 'var(--bg-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 2,
+                  fontFamily: 'inherit',
+                }}
+              />
               {t.replies.length > 0 && (
                 <div style={{ marginTop: 4, paddingLeft: 10, borderLeft: '2px solid var(--border)' }}>
                   {t.replies.map((r, ri) => (

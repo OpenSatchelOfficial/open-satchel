@@ -11,6 +11,34 @@
 
 import type { OcrPageData } from './pdfOcr'
 
+/** Prefix every OCR-synthesized paragraph id carries. Body-text
+ *  paragraph ids (clusterParagraphs) are `p_*`, so this prefix is a
+ *  collision-free origin marker. The save seam reads it to record the
+ *  OCR-specific degradations (ocr.overlay_only / ocr.style_forced) and
+ *  to skip body-clusterer layout enrichment (OCR boxes carry their own
+ *  OCR-derived geometry, not body-flow metadata). */
+export const OCR_PARAGRAPH_ID_PREFIX = 'ocr_'
+
+/** True when a paragraph id was synthesized by the OCR pipeline. The
+ *  one source of truth for OCR origin at the save seam — used instead
+ *  of threading a new flag through every edit-rebuild path (a flag a
+ *  rebuild could drop; the id is always present on a ParagraphEdit). */
+export function isOcrParagraphId(id: string | undefined | null): boolean {
+  return typeof id === 'string' && id.startsWith(OCR_PARAGRAPH_ID_PREFIX)
+}
+
+/** One recognized line within an OCR paragraph, in OCR pixel coords
+ *  (top-left origin, matching the rasterized canvas). */
+export interface OcrLine {
+  text: string
+  x: number
+  y: number
+  width: number
+  height: number
+  /** Median word height on this line — a per-line font-size estimate. */
+  fontSize: number
+}
+
 export interface OcrParagraph {
   /** Stable id derived from page + cluster index. */
   id: string
@@ -27,6 +55,10 @@ export interface OcrParagraph {
   /** Estimated font size — derived from the median word height.
    *  Default 12 if the cluster is empty / degenerate. */
   fontSize: number
+  /** Per-line geometry (Session 7). Lets the editor/overlay redraw each
+   *  recognized line at its real y/x/width instead of collapsing the
+   *  whole paragraph into one synthetic line. Top-to-bottom order. */
+  lines: OcrLine[]
 }
 
 export interface OcrToParagraphsOptions {
@@ -124,12 +156,28 @@ export function clusterOcrPageToParagraphs(
     const xMax = Math.max(...flatWords.map((w) => w.x + w.w))
     const yMin = Math.min(...flatWords.map((w) => w.y))
     const yMax = Math.max(...flatWords.map((w) => w.y + w.h))
+    // Per-line geometry (Session 7) — one OcrLine per recognized line,
+    // with a per-line median word-height font-size estimate.
+    const paraLines: OcrLine[] = c.lines.map((l) => {
+      const lx = Math.min(...l.words.map((w) => w.x))
+      const lxMax = Math.max(...l.words.map((w) => w.x + w.w))
+      const ly = Math.min(...l.words.map((w) => w.y))
+      const lyMax = Math.max(...l.words.map((w) => w.y + w.h))
+      const lh = l.words.map((w) => w.h).sort((a, b) => a - b)
+      const lineMedH = lh[Math.floor(lh.length / 2)] || medH
+      return {
+        text: l.words.map((w) => w.text).join(' '),
+        x: lx,
+        y: ly,
+        width: lxMax - lx,
+        height: lyMax - ly,
+        fontSize: lineMedH,
+      }
+    })
     // Per-line text join + line break between.
-    const text = c.lines
-      .map((l) => l.words.map((w) => w.text).join(' '))
-      .join('\n')
+    const text = paraLines.map((l) => l.text).join('\n')
     out.push({
-      id: `ocr_${pageIndex}_${i}`,
+      id: `${OCR_PARAGRAPH_ID_PREFIX}${pageIndex}_${i}`,
       pageIndex,
       text,
       bbox: {
@@ -140,6 +188,7 @@ export function clusterOcrPageToParagraphs(
       },
       words: flatWords,
       fontSize: medH,
+      lines: paraLines,
     })
   }
   return out
@@ -196,19 +245,33 @@ export function ocrParagraphsToBoxes(
       height: op.bbox.height / ocrScale,
     }
     const vpFontSize = op.fontSize / ocrScale
+    // One editor line per recognized OCR line (Session 7). `y` is the
+    // baseline ≈ the line's bottom edge, matching the ParagraphBox line
+    // convention. Falls back to a single full-paragraph line if the
+    // per-line geometry is somehow empty (degenerate OCR cluster).
+    const boxLines = (op.lines && op.lines.length > 0
+      ? op.lines.map((ln) => ({
+          y: (ln.y + ln.height) / ocrScale,
+          fontSize: ln.fontSize / ocrScale,
+          text: ln.text,
+          itemIndices: [] as number[],
+          x: ln.x / ocrScale,
+          width: ln.width / ocrScale,
+        }))
+      : [
+          {
+            y: vpBbox.y + vpBbox.height,
+            fontSize: vpFontSize,
+            text: op.text,
+            itemIndices: [] as number[],
+            x: vpBbox.x,
+            width: vpBbox.width,
+          },
+        ])
     return {
       id: op.id,
       itemIndices: [],
-      lines: [
-        {
-          y: vpBbox.y + vpBbox.height,
-          fontSize: vpFontSize,
-          text: op.text,
-          itemIndices: [],
-          x: vpBbox.x,
-          width: vpBbox.width,
-        },
-      ],
+      lines: boxLines,
       bbox: vpBbox,
       originalText: op.text,
       fontSize: vpFontSize,

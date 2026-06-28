@@ -83,8 +83,18 @@ export interface StructElemSpec {
   T?: string
   /** BBox for the element in page coordinates [x1,y1,x2,y2]. */
   BBox?: [number, number, number, number]
+  /** Table-header scope for /TH cells. */
+  Scope?: 'Row' | 'Column' | 'Both'
   /** XObject ref name (for /Figure entries that wrap a specific image). */
   xObjectName?: string
+  /** For /Link and /Form: indices into THIS element's page /Annots array
+   *  of the annotation(s) this structure element wraps. The element gets a
+   *  /K [/OBJR → annotation] child, and the annotation gets a /StructParent
+   *  bound into the /ParentTree — required by PDF/UA §7.18.4 (Form/Widget)
+   *  and §7.18.5 (Link). Resolved against the RELOADED doc inside
+   *  installStructTree, so indices (not PDFRefs, which are invalidated by
+   *  the save+reload) are the stable handle. */
+  annotIndices?: number[]
 }
 
 export interface StructTreeSpec {
@@ -110,7 +120,16 @@ export async function installStructTree(
   bytes: Uint8Array,
   spec: StructTreeSpec,
 ): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(bytes)
+  // Tolerant load (Session 8): the restore path runs this on bytes that
+  // already went through the engine bake / redaction / image rewrite,
+  // where a strict load can throw on a minor invalid object and abort
+  // re-tagging entirely. Matching extractTagSnapshot's options keeps a
+  // recoverable doc from being shipped untagged. The fixture generator
+  // calls this on freshly-created clean bytes, so it is unaffected.
+  const doc = await PDFDocument.load(bytes, {
+    throwOnInvalidObject: false,
+    ignoreEncryption: true,
+  })
   const ctx = doc.context
 
   // 1. Set /Lang on catalog (BCP 47 tag).
@@ -438,6 +457,47 @@ async function wrapContentStreamsWithMarkedContent(
     docElem.set(PDFName.of('K'), ctx.obj(merged) as unknown as PDFArray)
   }
 
+  // Bind annotations (Link/Form /OBJR children) into the /ParentTree:
+  // each annotation gets a /StructParent integer whose /ParentTree entry
+  // is the OWNING struct element (a single ref, not an MCID array). Without
+  // this the §7.18.4/§7.18.5 "annotation nested within Form/Link" rule fails
+  // (the annotation resolves to a null structParent type). Walks the user
+  // struct elems recursively; runs AFTER the MCID page entries so the
+  // structParent keys continue from the same counter.
+  const bindAnnotStructParents = (elemRef: PDFRef): void => {
+    const elem = ctx.lookup(elemRef)
+    if (!(elem instanceof PDFDict)) return
+    const s = elem.get(PDFName.of('S'))?.toString()
+    const kVal = elem.get(PDFName.of('K'))
+    const kArr = kVal instanceof PDFRef ? ctx.lookup(kVal) : kVal
+    if ((s === '/Link' || s === '/Form') && kArr instanceof PDFArray) {
+      for (let i = 0; i < kArr.size(); i++) {
+        const child = ctx.lookup(kArr.get(i))
+        if (child instanceof PDFDict && child.get(PDFName.of('Type'))?.toString() === '/OBJR') {
+          const annot = ctx.lookup(child.get(PDFName.of('Obj')))
+          if (annot instanceof PDFDict) {
+            const structParent = parentTreeNums.length / 2
+            annot.set(PDFName.of('StructParent'), PDFNumber.of(structParent))
+            parentTreeNums.push(PDFNumber.of(structParent))
+            parentTreeNums.push(elemRef as unknown as PDFArray)
+          }
+        }
+      }
+    }
+    if (kArr instanceof PDFArray) {
+      for (let i = 0; i < kArr.size(); i++) {
+        const cv = kArr.get(i)
+        if (cv instanceof PDFRef) {
+          const cd = ctx.lookup(cv)
+          if (cd instanceof PDFDict && cd.get(PDFName.of('Type'))?.toString() === '/StructElem') {
+            bindAnnotStructParents(cv)
+          }
+        }
+      }
+    }
+  }
+  for (const cr of existingChildRefs) bindAnnotStructParents(cr)
+
   // Install /ParentTree on the StructTreeRoot. Replaces the earlier
   // empty placeholder.
   const parentTreeDict = ctx.obj({
@@ -469,19 +529,55 @@ function materializeElem(doc: PDFDocument, spec: StructElemSpec, parent: PDFRef)
   if (spec.ActualText !== undefined) elem.set(PDFName.of('ActualText'), PDFString.of(spec.ActualText))
   if (spec.Lang) elem.set(PDFName.of('Lang'), PDFString.of(spec.Lang))
   if (spec.T) elem.set(PDFName.of('T'), PDFString.of(spec.T))
+  const attrs: any[] = []
   if (spec.BBox) {
     const a = ctx.obj(spec.BBox.map(n => PDFNumber.of(n))) as any
     // Attribute object — wrap in /A array per PDF spec
     const attrDict = ctx.obj({ O: PDFName.of('Layout'), BBox: a })
-    elem.set(PDFName.of('A'), ctx.obj([attrDict]) as any)
+    attrs.push(attrDict)
+  }
+  if (spec.Scope) {
+    attrs.push(ctx.obj({ O: PDFName.of('Table'), Scope: PDFName.of(spec.Scope) }))
+  }
+  if (attrs.length > 0) {
+    elem.set(PDFName.of('A'), ctx.obj(attrs) as any)
   }
 
   const elemRef = ctx.register(elem)
 
-  // Children
+  // PDF/UA §7.18.4 (Form/Widget) / §7.18.5 (Link): a /Link or /Form element
+  // binds its annotation(s) via an /OBJR (object reference) child. Resolve
+  // the annotation refs from THIS element's page /Annots by index (the
+  // save+reload inside installStructTree invalidates any PDFRef captured at
+  // draw time, so the index into /Annots is the stable handle). The matching
+  // /StructParent on each annotation + its /ParentTree entry are bound later,
+  // in wrapContentStreamsWithMarkedContent, where the parent-tree is built.
+  const objrRefs: PDFRef[] = []
+  if (
+    spec.annotIndices && spec.annotIndices.length > 0 &&
+    spec.pageIndex !== undefined && spec.pageIndex >= 0 && spec.pageIndex < doc.getPageCount()
+  ) {
+    const page = doc.getPage(spec.pageIndex)
+    const annots = ctx.lookup(page.node.get(PDFName.of('Annots')))
+    if (annots instanceof PDFArray) {
+      for (const ai of spec.annotIndices) {
+        if (ai < 0 || ai >= annots.size()) continue
+        const annotRef = annots.get(ai)
+        const objr = ctx.obj({ Type: PDFName.of('OBJR'), Obj: annotRef })
+        objrRefs.push(ctx.register(objr))
+      }
+    }
+  }
+
+  // Children: struct-element children and/or the OBJR annotation refs. A
+  // /Form that omits a Role attribute must have ONLY the single /OBJR child
+  // (§7.18.4 test 2), which holds because these fixtures give Form/Link no
+  // struct children.
   if (spec.children && spec.children.length > 0) {
     const childRefs = spec.children.map(c => materializeElem(doc, c, elemRef))
-    elem.set(PDFName.of('K'), ctx.obj(childRefs) as any)
+    elem.set(PDFName.of('K'), ctx.obj([...childRefs, ...objrRefs]) as any)
+  } else if (objrRefs.length > 0) {
+    elem.set(PDFName.of('K'), ctx.obj(objrRefs) as any)
   }
 
   return elemRef

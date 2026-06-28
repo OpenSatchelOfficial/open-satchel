@@ -22,6 +22,11 @@
 import type { PDFDocumentProxy } from 'pdfjs-dist'
 import { PDFDocument } from 'pdf-lib'
 import { parseContentStream, getPageContentBytes } from './contentStreamParser'
+import type { StyledRun } from './pdfParagraphEdits'
+import {
+  classifyPdfParagraphLayouts,
+  type PdfParagraphLayout,
+} from './pdfLayoutIntelligence'
 
 export interface TextItem {
   str: string
@@ -61,6 +66,26 @@ export interface ParagraphBox {
    *  before drawing the replacement. Avoids the white-rect-on-dark-
    *  header bug. */
   backgroundColor: string
+  /** Styled runs inferred from saved PDF drawing commands. This is used
+   *  for reopened rich-text edits whose underline/strike decorations were
+   *  saved as PDF strokes rather than as text attributes. */
+  runs?: StyledRun[]
+  /** Session 5 (R5b): true when this paragraph's font is EMBEDDED in
+   *  the document (pdfjs translated it with missingFile === false) but
+   *  its real family is UNRECOVERABLE — pdfjs styles report only a
+   *  generic fallback AND the commonObjs font object carries no usable
+   *  name (CID/Type3/name-table-less subsets). The generic
+   *  `fontFamily` stack on this paragraph is then a fallback-of-
+   *  necessity, NOT a faithful Standard-14 alias: the save path's
+   *  overlay resolution must record font.embed_resolution_failed +
+   *  font.substituted instead of the silent "faithful/alias class"
+   *  label. Absent/false when the family was recovered, the font is
+   *  not embedded, or recovery could not run (operational misses stay
+   *  conservative — no false fidelity records). */
+  fontFamilyIsGenericFallback?: boolean
+  /** Conservative layout role/safety classification used to decide
+   *  whether opt-in auto-layout may move neighboring PDF text. */
+  layout?: PdfParagraphLayout
 }
 
 export interface Line {
@@ -168,6 +193,158 @@ function normalizeFontFamily(family: string | undefined): string {
   return `'${family}', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif`
 }
 
+// ── Real-family recovery (Session 4, D1a) ─────────────────────────────
+//
+// pdfjs's `getTextContent().styles[*].fontFamily` exposes embedded
+// fonts only as the generic fallbackName ('sans-serif' | 'serif' |
+// 'monospace'), so the real family of a designed document never used
+// to reach the edit model — every custom-font paragraph clustered as
+// 'sans-serif' and the save path silently substituted Standard-14
+// without even knowing what it was substituting. These helpers recover
+// the real name from the translated font object in `page.commonObjs`
+// (populated by getOperatorList(); getTextContent() never commits
+// fonts — verified against pdfRedact.ts's getOperatorList precedent).
+
+/** True for pdfjs's generic fallback family names (and missing ones). */
+export function isGenericPdfjsFamily(family: string | undefined): boolean {
+  if (!family) return true
+  const f = family.trim().toLowerCase()
+  return f === 'sans-serif' || f === 'serif' || f === 'monospace'
+}
+
+/** Strip the 6-uppercase-letter subset tag: 'ABCDEF+Verdanq' → 'Verdanq'. */
+export function stripSubsetPrefix(name: string): string {
+  return name.replace(/^[A-Z]{6}\+/, '')
+}
+
+/** Recover a usable family name from a pdfjs commonObjs font object.
+ *  Probes `name` (BaseFont-derived) then `psName`, defensively — the
+ *  exact field set varies by font type. Returns null when nothing
+ *  better than a generic fallback or a pdfjs internal id is present. */
+export function recoverFamilyFromFontObject(fontObj: unknown): string | null {
+  if (!fontObj || typeof fontObj !== 'object') return null
+  const o = fontObj as { name?: unknown; psName?: unknown }
+  for (const candidate of [o.name, o.psName]) {
+    if (typeof candidate !== 'string') continue
+    const stripped = stripSubsetPrefix(candidate.trim())
+    if (!stripped || isGenericPdfjsFamily(stripped)) continue
+    // pdfjs internal ids ('g_d0_f1') are not family names.
+    if (/^g_d\d+_f\d+$/i.test(stripped)) continue
+    return stripped
+  }
+  return null
+}
+
+/** Per-page recovery result: recovered real families by pdfjs font
+ *  id, plus the ids whose font program IS embedded but whose name is
+ *  unrecoverable (Session 5, R5b — these must fail LOUD at save). */
+interface FamilyRecovery {
+  families: Map<string, string>
+  unrecoverable: Set<string>
+  /** Font ids whose recovery probe COMPLETED with a definite answer:
+   *  recovered, unrecoverable-but-embedded, or positively NOT embedded
+   *  (missingFile === true). Generic-styled fonts NOT in this set are
+   *  OPERATIONAL misses (object absent, probe threw, missingFile
+   *  indeterminate) — the paragraph's flag stays undefined so the save
+   *  seam re-checks and records the unknown instead of treating the
+   *  miss as "positively faithful" (gate-2 P1: the tri-state must not
+   *  collapse at the source). */
+  checked: Set<string>
+}
+
+/** Per-page recovery cache. Whole-document loops (find/replace body,
+ *  auto-tag, save-time reflow) call clusterParagraphs once per page —
+ *  sometimes repeatedly — and pdfjs returns the same PDFPageProxy for
+ *  a given page, so a WeakMap keyed on the proxy makes recovery a
+ *  once-per-page-per-session cost (and usually free even then: see
+ *  recoverRealFamilies' commonObjs-first probe). */
+const familyRecoveryCache = new WeakMap<object, FamilyRecovery>()
+
+/** Recover real families for every font whose getTextContent style is
+ *  only the generic pdfjs fallbackName. commonObjs is probed first —
+ *  fonts land there during normal rendering, so the expensive forced
+ *  getOperatorList() pass runs only when some generic font is still
+ *  untranslated (headless drivers, cluster-before-first-render). */
+async function recoverRealFamilies(
+  page: {
+    getOperatorList: () => Promise<unknown>
+    commonObjs: { has: (n: string) => boolean; get: (n: string) => unknown }
+  },
+  items: TextItem[],
+  styles: Record<string, PdfjsStyle>,
+): Promise<FamilyRecovery> {
+  const cached = familyRecoveryCache.get(page)
+  if (cached) return cached
+
+  const recovered = new Map<string, string>()
+  // Session 5 (R5b): a generic-styled font whose translated object IS
+  // present with an EMBEDDED program (missingFile === false strictly —
+  // undefined stays conservative) but yields no recoverable name is a
+  // genuine unrecoverable embedded font, not an operational miss. The
+  // save path records the substitution loudly for these.
+  const unrecoverable = new Set<string>()
+  const genericFontNames = new Set<string>()
+  for (const it of items) {
+    if (!it.fontName) continue
+    if (isGenericPdfjsFamily(styles[it.fontName]?.fontFamily)) {
+      genericFontNames.add(it.fontName)
+    }
+  }
+
+  const checked = new Set<string>()
+  const harvest = () => {
+    for (const fontName of genericFontNames) {
+      if (recovered.has(fontName)) continue
+      try {
+        if (!page.commonObjs.has(fontName)) continue
+        const fontObj = page.commonObjs.get(fontName)
+        const family = recoverFamilyFromFontObject(fontObj)
+        if (family) {
+          recovered.set(fontName, family)
+          unrecoverable.delete(fontName)
+          checked.add(fontName)
+        } else if (fontObj && typeof fontObj === 'object') {
+          const missingFile = (fontObj as { missingFile?: unknown }).missingFile
+          if (missingFile === false) {
+            unrecoverable.add(fontName)
+            checked.add(fontName)
+          } else if (missingFile === true) {
+            // Positively NOT embedded — the generic style is pdfjs's
+            // substitution of a missing font, not a recovery failure.
+            checked.add(fontName)
+          }
+          // missingFile indeterminate → stays unchecked (operational).
+        }
+      } catch {
+        /* unresolved object — stays unchecked (operational miss) */
+      }
+    }
+  }
+
+  if (genericFontNames.size > 0) {
+    harvest()
+    const allWarm = [...genericFontNames].every((n) => {
+      try {
+        return page.commonObjs.has(n)
+      } catch {
+        return false
+      }
+    })
+    if (!allWarm) {
+      try {
+        await page.getOperatorList()
+        harvest()
+      } catch {
+        /* operator list unavailable — keep the generic fallback */
+      }
+    }
+  }
+
+  const result: FamilyRecovery = { families: recovered, unrecoverable, checked }
+  familyRecoveryCache.set(page, result)
+  return result
+}
+
 function isBoldName(fontName: string): boolean {
   return /bold|black|heavy|semibold/i.test(fontName)
 }
@@ -251,6 +428,170 @@ export async function getParagraphTextColorsFromStream(
   return out
 }
 
+interface HorizontalStroke {
+  x0: number
+  x1: number
+  y: number
+}
+
+function numericArg(value: unknown): number | null {
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function sameRunDecor(a: StyledRun, b: StyledRun): boolean {
+  return (
+    Boolean(a.underline) === Boolean(b.underline) &&
+    Boolean(a.strikethrough) === Boolean(b.strikethrough)
+  )
+}
+
+function collectHorizontalStrokes(bytes: Uint8Array): HorizontalStroke[] {
+  const parsed = parseContentStream(bytes)
+  const strokes: HorizontalStroke[] = []
+  let move: { x: number; y: number } | null = null
+  let line: { x0: number; y0: number; x1: number; y1: number } | null = null
+
+  for (const op of parsed.operators) {
+    if (op.operator === 'm') {
+      const x = numericArg(op.args[0])
+      const y = numericArg(op.args[1])
+      move = x === null || y === null ? null : { x, y }
+      line = null
+      continue
+    }
+    if (op.operator === 'l' && move) {
+      const x = numericArg(op.args[0])
+      const y = numericArg(op.args[1])
+      line = x === null || y === null ? null : {
+        x0: move.x,
+        y0: move.y,
+        x1: x,
+        y1: y,
+      }
+      continue
+    }
+    if (op.operator === 'S' || op.operator === 's') {
+      if (line && Math.abs(line.y0 - line.y1) <= 0.75) {
+        const x0 = Math.min(line.x0, line.x1)
+        const x1 = Math.max(line.x0, line.x1)
+        if (x1 - x0 >= 2) strokes.push({ x0, x1, y: (line.y0 + line.y1) / 2 })
+      }
+      line = null
+    }
+  }
+
+  return strokes
+}
+
+function strokeOverlapsRange(stroke: HorizontalStroke, x0: number, x1: number): boolean {
+  const width = Math.max(0, x1 - x0)
+  const strokeWidth = Math.max(0, stroke.x1 - stroke.x0)
+  if (width <= 0 || strokeWidth <= 0) return false
+  const overlap = Math.max(0, Math.min(stroke.x1, x1) - Math.max(stroke.x0, x0))
+  return overlap >= Math.min(width, strokeWidth) * 0.45 && overlap >= Math.min(2, width * 0.25)
+}
+
+function hasDecorationStroke(
+  strokes: HorizontalStroke[],
+  x0: number,
+  x1: number,
+  expectedY: number,
+  fontSize: number,
+): boolean {
+  const yTol = Math.max(1.25, fontSize * 0.18)
+  return strokes.some((stroke) =>
+    Math.abs(stroke.y - expectedY) <= yTol &&
+    strokeOverlapsRange(stroke, x0, x1),
+  )
+}
+
+function appendStyledRun(runs: StyledRun[], next: StyledRun): void {
+  if (!next.text) return
+  const last = runs[runs.length - 1]
+  if (last && sameRunDecor(last, next)) {
+    last.text += next.text
+    return
+  }
+  runs.push(next)
+}
+
+function inferRunsForParagraph(
+  paragraph: ParagraphBox,
+  items: TextItem[],
+  pageHeight: number,
+  strokes: HorizontalStroke[],
+): StyledRun[] | null {
+  const runs: StyledRun[] = []
+  let decorated = false
+
+  paragraph.lines.forEach((line, lineIndex) => {
+    for (const idx of line.itemIndices) {
+      const item = items[idx]
+      if (!item?.str) continue
+      const geom = itemGeometry(item, pageHeight)
+      const baselinePdfY = item.transform[5]
+      const underlineY = baselinePdfY - geom.fontSize * 0.12
+      const strikeY = baselinePdfY + geom.fontSize * 0.32
+      const pieces = item.str.split(/(\s+)/).filter((piece) => piece.length > 0)
+      const totalChars = Math.max(1, item.str.length)
+      let cursorX = geom.x
+
+      for (const piece of pieces) {
+        const pieceWidth = geom.width * (piece.length / totalChars)
+        const x0 = cursorX
+        const x1 = cursorX + pieceWidth
+        cursorX = x1
+        const underline = hasDecorationStroke(strokes, x0, x1, underlineY, geom.fontSize)
+        const strikethrough = hasDecorationStroke(strokes, x0, x1, strikeY, geom.fontSize)
+        decorated = decorated || underline || strikethrough
+        appendStyledRun(runs, {
+          text: piece,
+          ...(underline ? { underline: true } : {}),
+          ...(strikethrough ? { strikethrough: true } : {}),
+        })
+      }
+    }
+    if (lineIndex < paragraph.lines.length - 1) appendStyledRun(runs, { text: '\n' })
+  })
+
+  return decorated ? runs : null
+}
+
+/**
+ * Reconstruct underline/strikethrough run metadata from saved PDF strokes.
+ *
+ * Our rich-text save path persists underline/strike as real vector lines,
+ * because PDF text has no native per-run decoration attribute. On reopen,
+ * pdfjs only exposes the text items; without this pass, dragging that text
+ * later moves the glyphs but leaves the old decoration strokes behind. We
+ * map horizontal strokes back onto the text items whose baselines they sit
+ * under/through so subsequent paragraph edits can redraw the same runs.
+ */
+export async function getParagraphStyledRunsFromStream(
+  pdfBytes: Uint8Array,
+  pageIndex: number,
+  paragraphs: ParagraphBox[],
+  pageHeight: number,
+  items: TextItem[],
+): Promise<Map<string, StyledRun[]>> {
+  const out = new Map<string, StyledRun[]>()
+  try {
+    const doc = await PDFDocument.load(pdfBytes)
+    const streamData = getPageContentBytes(doc, pageIndex)
+    if (!streamData) return out
+    const strokes = collectHorizontalStrokes(streamData.bytes)
+    if (strokes.length === 0) return out
+    for (const paragraph of paragraphs) {
+      const runs = inferRunsForParagraph(paragraph, items, pageHeight, strokes)
+      if (runs) out.set(paragraph.id, runs)
+    }
+  } catch {
+    // Unsupported/corrupt streams simply behave like normal plain text.
+  }
+  return out
+}
+
 /**
  * Derive each paragraph's BACKGROUND color from the rendered canvas.
  * Kept from the earlier implementation because the content stream
@@ -318,17 +659,42 @@ export async function clusterParagraphs(
   const textContent = await page.getTextContent()
   const items = textContent.items as unknown as TextItem[]
   const styles = (textContent.styles ?? {}) as Record<string, PdfjsStyle>
+
+  // Session 4 (D1a): recover real font families for fonts whose style
+  // entry is only the generic pdfjs fallback. Fonts land in commonObjs
+  // only during rendering / operator-list generation. In the app the
+  // page is usually already rendered, so the translated font objects
+  // are warm — probe commonObjs FIRST and force a getOperatorList()
+  // pass only when some generic font is still missing (headless
+  // drivers, cluster-before-first-render). Results cache per page
+  // proxy: whole-document loops (find/replace, auto-tag, save-time
+  // reflow) call clusterParagraphs repeatedly and must not re-pay the
+  // operator-list cost. Best-effort: any failure keeps today's
+  // generic behavior.
+  const recovery = await recoverRealFamilies(page, items, styles)
+  const recoveredFamilies = recovery.families
   page.cleanup()
 
   type ItemPlus = {
     orig: number
     item: TextItem
     geom: ReturnType<typeof itemGeometry>
+    hardBreakBefore: boolean
   }
   const enriched: ItemPlus[] = []
+  let pendingHardBreak = false
   items.forEach((it, i) => {
-    if (!it.str || !it.str.length) return
-    enriched.push({ orig: i, item: it, geom: itemGeometry(it, pageHeight) })
+    if (!it.str || !it.str.length) {
+      if (it.hasEOL) pendingHardBreak = true
+      return
+    }
+    enriched.push({
+      orig: i,
+      item: it,
+      geom: itemGeometry(it, pageHeight),
+      hardBreakBefore: pendingHardBreak,
+    })
+    pendingHardBreak = false
   })
 
   // Sort by y (top-down) with ties broken by x (left-right).
@@ -351,6 +717,7 @@ export async function clusterParagraphs(
     items: ItemPlus[]
     xLeft: number
     xRight: number
+    hardBreakBefore: boolean
   }
   const segments: Segment[] = []
   let currentYLine: ItemPlus[] = []
@@ -399,12 +766,22 @@ export async function clusterParagraphs(
       const colonSplit =
         prevStr.endsWith(':') && gap >= fs * opts.labelColonGapFactor
 
+      // Signal 4 — overprinted/overlapped text objects. If two
+      // rendered text items on the same baseline overlap horizontally,
+      // treating them as one line fuses independent Acrobat-style text
+      // boxes. Small negative gaps can come from font metrics/kerning,
+      // so only split on meaningful overlap.
+      const overlapSplit =
+        !curWide &&
+        !prevWide &&
+        gap < -fs * 0.25
+
       if (curWide) {
         splitBefore.add(i + 1)
         dropItems.add(i)
       } else if (prevWide) {
         splitBefore.add(i)
-      } else if (gapSplit || colonSplit) {
+      } else if (cur.hardBreakBefore || gapSplit || colonSplit || overlapSplit) {
         splitBefore.add(i)
       }
     }
@@ -442,7 +819,15 @@ export async function clusterParagraphs(
     const yTop = Math.min(...its.map((i) => i.geom.y))
     const baseline = median(its.map((i) => i.geom.baselineY))
     const fontSize = median(its.map((i) => i.geom.fontSize))
-    return { yTop, baselineY: baseline, fontSize, items: its, xLeft, xRight }
+    return {
+      yTop,
+      baselineY: baseline,
+      fontSize,
+      items: its,
+      xLeft,
+      xRight,
+      hardBreakBefore: its[0]?.hardBreakBefore === true,
+    }
   }
 
   for (const it of enriched) {
@@ -474,6 +859,7 @@ export async function clusterParagraphs(
   //   - font-size continuity: ratio not > 1.5 (bigger → heading break)
   const paragraphs: ParagraphBox[] = []
   let currentPara: Segment[] = []
+  const paragraphIdCounts = new Map<string, number>()
   const flushPara = () => {
     if (currentPara.length === 0) return
     const itemIndices: number[] = []
@@ -534,25 +920,52 @@ export async function clusterParagraphs(
     //   2. fontName containing 'bold'/'black'/'heavy' (covers some PDFs)
     //   3. Large font size as a weak heading heuristic — titles/headers
     //      are almost always bold in designed documents.
-    const resolvedFamily = style.fontFamily ?? ''
+    // Session 4 (D1a): a recovered real family ('ABCDEF+Verdanq' →
+    // 'Verdanq') supersedes the generic pdfjs fallback for both the
+    // emitted fontFamily and the bold/italic name heuristics (real
+    // names carry '-Bold'/'-Italic' suffixes the fallback never had).
+    const recoveredFamily = recoveredFamilies.get(fontName)
+    const resolvedFamily = recoveredFamily ?? style.fontFamily ?? ''
+    // Session 5 (R5b), TRI-STATE (gate-2 P1): true = embedded program
+    // with an unrecoverable name (the save path substitutes LOUDLY);
+    // false = positively known faithful (real style family, recovered
+    // name, or positively-not-embedded); undefined = the recovery
+    // probe could not complete — the save seam re-checks and records
+    // the unknown.
+    const genericStyled = isGenericPdfjsFamily(style.fontFamily)
+    const genericFallback: boolean | undefined = !genericStyled
+      ? false
+      : recoveredFamily !== undefined
+        ? false
+        : recovery.unrecoverable.has(fontName)
+          ? true
+          : recovery.checked.has(fontName)
+            ? false
+            : undefined
     const bold =
       isBoldName(fontName) ||
       isBoldName(resolvedFamily) ||
       medFontSize >= 20
+    const baseId = `p_${pageIndex}_${Math.round(minX)}_${Math.round(minY)}`
+    const collisionCount = paragraphIdCounts.get(baseId) ?? 0
+    paragraphIdCounts.set(baseId, collisionCount + 1)
+    const firstItemIndex = itemIndices.length > 0 ? Math.min(...itemIndices) : paragraphs.length
+    const paragraphId = collisionCount === 0 ? baseId : `${baseId}_i${firstItemIndex}`
     paragraphs.push({
-      id: `p_${pageIndex}_${Math.round(minX)}_${Math.round(minY)}`,
+      id: paragraphId,
       itemIndices,
       lines: allLines,
       bbox: { x: minX, y: minY, width: maxX - minX, height: maxY - minY },
       originalText: texts.join('\n'),
       fontSize: medFontSize,
       fontName,
-      fontFamily: normalizeFontFamily(style.fontFamily),
+      fontFamily: normalizeFontFamily(recoveredFamily ?? style.fontFamily),
       bold,
       italic: isItalicName(fontName) || isItalicName(resolvedFamily),
       color: '#000000',
       onDarkBackground: false,
       backgroundColor: '#ffffff',
+      ...(genericFallback !== undefined ? { fontFamilyIsGenericFallback: genericFallback } : {}),
     })
     currentPara = []
   }
@@ -575,7 +988,7 @@ export async function clusterParagraphs(
       Math.max(prev.fontSize, seg.fontSize) /
       Math.max(Math.min(prev.fontSize, seg.fontSize), 1)
     const sizeCompat = fontSizeRatio <= 1.5
-    if (colAligned && gapOk && sizeCompat) {
+    if (!seg.hardBreakBefore && colAligned && gapOk && sizeCompat) {
       currentPara.push(seg)
     } else {
       flushPara()
@@ -585,5 +998,12 @@ export async function clusterParagraphs(
   }
   flushPara()
 
-  return { paragraphs, pageWidth, pageHeight, items }
+  const classified = classifyPdfParagraphLayouts(paragraphs, {
+    pageIndex,
+    pageWidth,
+    pageHeight,
+    rotation: viewport.rotation ?? 0,
+  })
+
+  return { paragraphs: classified, pageWidth, pageHeight, items }
 }

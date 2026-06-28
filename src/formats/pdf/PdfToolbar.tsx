@@ -1,13 +1,13 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import './PdfToolbar.css'
 import { useFontStore } from '../../stores/fontStore'
 import type { FormatViewerProps } from '../types'
 import { useUIStore } from '../../stores/uiStore'
 import { useFormatStore } from '../../stores/formatStore'
 import { useTabStore } from '../../stores/tabStore'
-import type { Tool } from '../../types/pdf'
+import type { TextOptions, Tool } from '../../types/pdf'
 import type { PdfFormatState } from './index'
-import { STAMPS } from '../../components/editor/StampTool'
+import { STAMPS, STAMP_TOKEN_SHORTCUTS, TEXT_STAMP_INDEX } from '../../components/editor/StampTool'
 import WatermarkDialog, { type WatermarkOptions } from './WatermarkDialog'
 import PasswordDialog from './PasswordDialog'
 import CertEncryptDialog from './CertEncryptDialog'
@@ -19,6 +19,7 @@ import FontPicker from './FontPicker'
 import PageSizeDialog from './PageSizeDialog'
 import PdfAdvancedDialog from './PdfAdvancedDialog'
 import SnipPinDialog from './SnipPinDialog'
+import SearchAndRedactDialog from './SearchAndRedactDialog'
 import BatchDialog from './BatchDialog'
 import WatchedFoldersDialog from './WatchedFoldersDialog'
 import CustomStampsDialog from './CustomStampsDialog'
@@ -43,6 +44,8 @@ import PageLabelsDialog from './PageLabelsDialog'
 import LinkEditorDialog from './LinkEditorDialog'
 import NamedDestinationsDialog from './NamedDestinationsDialog'
 import { readPdfPageAloud, stopReading, listVoices } from '../../services/pdfTextOps'
+import { printPdfTab } from '../../services/pdfPrint'
+import { countManualRedactions } from '../../services/pdfManualRedactions'
 import { useFormatStore as useFS2 } from '../../stores/formatStore'
 import { useViewerFeatures } from '../../services/viewerFeatures'
 import { useFormatStore as useFS } from '../../stores/formatStore'
@@ -75,10 +78,17 @@ const TAB_ICON: Record<RibbonTab, string> = {
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 28, 32, 36, 48, 60, 72]
 
 const LINE_SPACINGS = [1.0, 1.15, 1.5, 2.0]
+const PARAGRAPH_STYLE_EVENT = 'open-satchel:paragraph-style'
+
+function markTextToolbarInteraction() {
+  ;(window as Window & { __openSatchelTextToolbarPointerAt?: number })
+    .__openSatchelTextToolbarPointerAt = Date.now()
+}
 
 export default function PdfToolbar({ tabId }: FormatViewerProps) {
   const ui = useUIStore()
   const vf = useViewerFeatures()
+  const textStampInputRef = useRef<HTMLTextAreaElement | null>(null)
   const [ribbonTab, setRibbonTab] = useState<RibbonTab>('Home')
   const [showWatermark, setShowWatermark] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
@@ -90,6 +100,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
   const [showPageSize, setShowPageSize] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [showSnipPin, setShowSnipPin] = useState(false)
+  const [showFindRedact, setShowFindRedact] = useState(false)
   const [showBatchPrint, setShowBatchPrint] = useState(false)
   const [showBatchRename, setShowBatchRename] = useState(false)
   const [showBatchOcr, setShowBatchOcr] = useState(false)
@@ -113,7 +124,61 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>(() => listVoices())
   const [selectedVoice, setSelectedVoice] = useState<string>('')
   const ttPdfBytes = useFS2((s) => (s.data[tabId] as PdfFormatState | undefined)?.pdfBytes)
+  const pendingRedactionCount = useFormatStore((s) =>
+    countManualRedactions(s.data[tabId] as PdfFormatState | undefined),
+  )
   const pdfDocForTools = usePdfDocument(ttPdfBytes ?? null)
+  // Print the document via an off-screen PDF iframe — NOT window.print(),
+  // which would rasterize the whole app (ribbon, sidebar, tabs). See
+  // services/pdfPrint.ts.
+  const handlePrint = async () => {
+    try {
+      await printPdfTab(tabId)
+    } catch (e) {
+      console.error('[print] failed:', e)
+    }
+  }
+  const setTextFormatting = (patch: Partial<TextOptions>) => {
+    markTextToolbarInteraction()
+    ui.setTextOptions(patch)
+    if (ui.tool !== 'edit_text') return
+    const detail: Record<string, unknown> = {}
+    if (typeof patch.fontSize === 'number') detail.fontSize = patch.fontSize
+    if (typeof patch.color === 'string') detail.color = patch.color
+    if (typeof patch.fontFamily === 'string') detail.fontFamily = patch.fontFamily
+    if (typeof patch.customFontId === 'string' || patch.customFontId === undefined) {
+      if ('customFontId' in patch) detail.customFontId = patch.customFontId
+    }
+    if (typeof patch.bold === 'boolean') detail.bold = patch.bold
+    if (typeof patch.italic === 'boolean') detail.italic = patch.italic
+    if (typeof patch.underline === 'boolean') detail.underline = patch.underline
+    if (typeof patch.strikethrough === 'boolean') detail.strikethrough = patch.strikethrough
+    if (typeof patch.textAlign === 'string') detail.align = patch.textAlign
+    if (typeof patch.lineHeight === 'number') detail.lineHeight = patch.lineHeight
+    if (Object.keys(detail).length > 0) {
+      window.dispatchEvent(new CustomEvent(PARAGRAPH_STYLE_EVENT, { detail }))
+    }
+  }
+  const activateTextStamp = () => {
+    ui.setSelectedStamp(TEXT_STAMP_INDEX)
+    ui.setTool('stamp')
+  }
+  const insertStampToken = (token: string) => {
+    const input = textStampInputRef.current
+    const current = ui.textStampTemplate
+    const useCaret = !!input && document.activeElement === input
+    const start = useCaret ? input.selectionStart ?? current.length : current.length
+    const end = useCaret ? input.selectionEnd ?? start : start
+    const spacerBefore = start > 0 && !/\s$/.test(current.slice(0, start)) ? ' ' : ''
+    const spacerAfter = end < current.length && !/^\s/.test(current.slice(end)) ? ' ' : ''
+    const next = `${current.slice(0, start)}${spacerBefore}${token}${spacerAfter}${current.slice(end)}`
+    const caret = start + spacerBefore.length + token.length
+    ui.setTextStampTemplate(next)
+    requestAnimationFrame(() => {
+      textStampInputRef.current?.focus()
+      textStampInputRef.current?.setSelectionRange(caret, caret)
+    })
+  }
 
   // Voices populate asynchronously on first page load in Chromium-based
   // browsers — listen for voiceschanged so the picker isn't stuck empty.
@@ -186,36 +251,13 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
   const tabLabel = (t: RibbonTab) => t === 'FillSign' ? 'Fill & Sign' : t
 
   const commitOrder = (next: RibbonTab[]) => {
-    const before = ribbonTabs
     setRibbonTabs(next)
     saveRibbonOrder(next)
-    // Push to undo history so Ctrl+Z reverts the drag-reorder. Skip
-    // when replaying (the keyboard handler sets that flag while it
-    // applies a stored before/after pair).
-    try {
-      // Lazy import to avoid loading historyStore at module init.
-      void import('../../stores/historyStore').then(({ useHistoryStore, isReplaying }) => {
-        if (isReplaying()) return
-        useHistoryStore.getState().pushUndo({
-          type: 'ui:ribbonOrder',
-          before: before as readonly string[] as string[],
-          after: next as readonly string[] as string[],
-        })
-      })
-    } catch { /* history wiring optional */ }
+    // (No history push — ribbon drag-reorder is UI state, and undo
+    // is document history only per the 2026-06-11 decision.)
   }
-  // Expose the setter so the keyboard handler can apply undo/redo
-  // entries against this PdfToolbar instance. Stored on window under a
-  // namespaced key — there's only one PDF toolbar mounted at a time.
-  useEffect(() => {
-    ;(window as Window & { __pdfRibbonSetTabs?: (t: RibbonTab[]) => void }).__pdfRibbonSetTabs = (t: RibbonTab[]) => {
-      setRibbonTabs(t)
-      saveRibbonOrder(t)
-    }
-    return () => {
-      delete (window as Window & { __pdfRibbonSetTabs?: (t: RibbonTab[]) => void }).__pdfRibbonSetTabs
-    }
-  }, [])
+  // (The __pdfRibbonSetTabs window hook is gone with ribbon-order
+  // undo — its only consumer was the deleted ui:ribbonOrder replay.)
   const handleTabContextMenu = (e: React.MouseEvent) => {
     // Right-click the tab strip → reset to default order.
     e.preventDefault()
@@ -288,7 +330,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
           <>
             <RibbonGroup label="Select">
               <RBtn text="Select" active={ui.tool === 'select'} onClick={() => ui.setTool('select')} />
-              {/* Read mode toggle. When on,
+              {/* Phase D (docs/MODELESS.md): Read mode toggle. When on,
                   paragraph outlines are hidden, Fabric annotations are
                   view-only, all tools no-op. User can flip back to edit
                   any time. Placed in the Select group so it's the very
@@ -303,37 +345,77 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <RBtn text="Edit Image" active={ui.tool === 'edit_image'}
                 onClick={() => ui.setTool(ui.tool === 'edit_image' ? 'select' : 'edit_image')} />
               <RBtn text="Add Text" active={ui.tool === 'text'} onClick={() => ui.setTool('text')} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}>
-                <FontPicker />
+              <div
+                onPointerDownCapture={markTextToolbarInteraction}
+                onMouseDownCapture={markTextToolbarInteraction}
+                style={{ display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap' }}
+              >
+                <FontPicker
+                  onTextFormatting={setTextFormatting}
+                  markTextToolbarInteraction={markTextToolbarInteraction}
+                />
                 <select value={ui.textOptions.fontSize}
-                  onChange={(e) => ui.setTextOptions({ fontSize: Number(e.target.value) })}
+                  data-testid="pdf-text-font-size"
+                  onChange={(e) => setTextFormatting({ fontSize: Number(e.target.value) })}
                   style={{ width: 48, fontSize: 10, padding: '2px 4px' }}>
                   {FONT_SIZES.map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
                 <input type="color" value={ui.textOptions.color}
-                  onChange={(e) => ui.setTextOptions({ color: e.target.value })}
+                  data-testid="pdf-text-color"
+                  onChange={(e) => setTextFormatting({ color: e.target.value })}
                   style={{ width: 20, height: 18, border: 'none', cursor: 'pointer', padding: 0 }} />
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                <MiniBtn text="B" active={ui.textOptions.bold} onClick={() => ui.setTextOptions({ bold: !ui.textOptions.bold })} bold />
-                <MiniBtn text="I" active={ui.textOptions.italic} onClick={() => ui.setTextOptions({ italic: !ui.textOptions.italic })} italic />
-                <MiniBtn text="U" active={ui.textOptions.underline} onClick={() => ui.setTextOptions({ underline: !ui.textOptions.underline })} />
-                <MiniBtn text="S" active={ui.textOptions.strikethrough} onClick={() => ui.setTextOptions({ strikethrough: !ui.textOptions.strikethrough })} />
+              <div
+                onPointerDownCapture={markTextToolbarInteraction}
+                onMouseDownCapture={markTextToolbarInteraction}
+                style={{ display: 'flex', alignItems: 'center', gap: 3 }}
+              >
+                <MiniBtn text="B" active={ui.textOptions.bold} onClick={() => setTextFormatting({ bold: !ui.textOptions.bold })} bold testId="pdf-text-bold" />
+                <MiniBtn text="I" active={ui.textOptions.italic} onClick={() => setTextFormatting({ italic: !ui.textOptions.italic })} italic testId="pdf-text-italic" />
+                <MiniBtn text="U" active={ui.textOptions.underline} onClick={() => setTextFormatting({ underline: !ui.textOptions.underline })} testId="pdf-text-underline" underline />
+                <MiniBtn text="S" active={ui.textOptions.strikethrough} onClick={() => setTextFormatting({ strikethrough: !ui.textOptions.strikethrough })} testId="pdf-text-strikethrough" strike />
                 <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 2px' }} />
-                <MiniBtn text="&#8676;" active={ui.textOptions.textAlign === 'left'} onClick={() => ui.setTextOptions({ textAlign: 'left' })} />
-                <MiniBtn text="&#8700;" active={ui.textOptions.textAlign === 'center'} onClick={() => ui.setTextOptions({ textAlign: 'center' })} />
-                <MiniBtn text="&#8677;" active={ui.textOptions.textAlign === 'right'} onClick={() => ui.setTextOptions({ textAlign: 'right' })} />
+                <MiniBtn text="&#8676;" active={ui.textOptions.textAlign === 'left'} onClick={() => setTextFormatting({ textAlign: 'left' })} testId="pdf-text-align-left" />
+                <MiniBtn text="&#8700;" active={ui.textOptions.textAlign === 'center'} onClick={() => setTextFormatting({ textAlign: 'center' })} testId="pdf-text-align-center" />
+                <MiniBtn text="&#8677;" active={ui.textOptions.textAlign === 'right'} onClick={() => setTextFormatting({ textAlign: 'right' })} testId="pdf-text-align-right" />
                 <span style={{ width: 1, height: 14, background: 'var(--border)', margin: '0 2px' }} />
                 <select value={ui.textOptions.lineHeight}
-                  onChange={(e) => ui.setTextOptions({ lineHeight: Number(e.target.value) })}
+                  data-testid="pdf-text-line-height"
+                  onChange={(e) => setTextFormatting({ lineHeight: Number(e.target.value) })}
                   style={{ width: 46, fontSize: 10, padding: '2px 2px' }}
                   title="Line spacing">
                   {LINE_SPACINGS.map((s) => (
                     <option key={s} value={s}>{s.toFixed(s === 1 ? 1 : 2)}</option>
                   ))}
                 </select>
+                <label
+                  data-testid="pdf-text-auto-layout-toggle"
+                  title="Auto layout edited PDF text"
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 4,
+                    height: 22,
+                    padding: '0 6px',
+                    border: '1px solid var(--border)',
+                    borderRadius: 6,
+                    fontSize: 10,
+                    color: ui.autoLayoutTextEdits ? 'var(--accent)' : 'var(--ink-2)',
+                    background: ui.autoLayoutTextEdits ? 'var(--bg-active)' : 'transparent',
+                    whiteSpace: 'nowrap',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={ui.autoLayoutTextEdits}
+                    onChange={(e) => ui.setAutoLayoutTextEdits(e.target.checked)}
+                    style={{ margin: 0, accentColor: 'var(--accent)' }}
+                  />
+                  <span>Auto layout</span>
+                </label>
               </div>
             </RibbonGroup>
             <RibbonGroup label="Draw">
@@ -388,15 +470,50 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
             </RibbonGroup>
             <RibbonGroup label="Stamps">
               {STAMPS.slice(0, 5).map((s, i) => (
-                <RBtn key={i} text={s.text} active={ui.tool === 'stamp' && ui.selectedStamp === i}
+                <RBtn key={i} text={s.label ?? s.text} active={ui.tool === 'stamp' && ui.selectedStamp === i}
                   onClick={() => { ui.setSelectedStamp(i); ui.setTool('stamp') }}
                   color={s.color} small />
               ))}
               {STAMPS.slice(5).map((s, i) => (
-                <RBtn key={i + 5} text={s.text} active={ui.tool === 'stamp' && ui.selectedStamp === i + 5}
+                <RBtn key={i + 5} text={s.label ?? s.text} active={ui.tool === 'stamp' && ui.selectedStamp === i + 5}
                   onClick={() => { ui.setSelectedStamp(i + 5); ui.setTool('stamp') }}
                   color={s.color} small />
               ))}
+              <div className="stamp-template-strip">
+                <textarea
+                  ref={textStampInputRef}
+                  data-testid="pdf-text-stamp-template"
+                  className="stamp-template-input"
+                  value={ui.textStampTemplate}
+                  rows={1}
+                  spellCheck={false}
+                  onChange={(e) => ui.setTextStampTemplate(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      activateTextStamp()
+                    }
+                  }}
+                  title="Text stamp template"
+                />
+                <RBtn text="Text Stamp" active={ui.tool === 'stamp' && ui.selectedStamp === TEXT_STAMP_INDEX}
+                  onClick={activateTextStamp}
+                  title="Place the typed text stamp" small />
+              </div>
+              <div className="stamp-token-row" aria-label="Stamp tokens">
+                {STAMP_TOKEN_SHORTCUTS.map((t) => (
+                  <button
+                    key={t.token}
+                    type="button"
+                    className="stamp-token-btn"
+                    title={t.token}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => insertStampToken(t.token)}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
               <RBtn text="Custom…" onClick={() => setShowCustomStamps(true)}
                 title="Manage and import custom stamps (PNG/JPEG)" small />
             </RibbonGroup>
@@ -489,7 +606,27 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <RBtn text="Wipe Off" active={ui.tool === 'wipe_off'} onClick={() => ui.setTool('wipe_off')} />
             </RibbonGroup>
             <RibbonGroup label="Redaction">
+              <RBtn text="Mark Redaction" icon="Redact" active={ui.tool === 'mark_redaction'} onClick={() => ui.setTool('mark_redaction')} />
               <RBtn text="Redact" active={ui.tool === 'redact'} onClick={() => ui.setTool('redact')} />
+              <RBtn text="Find &amp; Redact…" data-testid="ribbon-find-redact" onClick={() => setShowFindRedact(true)} />
+              {pendingRedactionCount > 0 && (
+                <span
+                  data-testid="redaction-pending-count"
+                  style={{
+                    alignSelf: 'center',
+                    padding: '2px 6px',
+                    border: '2px solid #000',
+                    borderRadius: 3,
+                    color: '#000',
+                    background: '#fff',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    lineHeight: 1.2,
+                  }}
+                >
+                  {pendingRedactionCount} marked
+                </span>
+              )}
             </RibbonGroup>
             <RibbonGroup label="Measure">
               <RBtn text="Measure" active={ui.tool === 'measure'} onClick={() => ui.setTool('measure')} />
@@ -540,7 +677,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               )}
             </RibbonGroup>
             <RibbonGroup label="Print">
-              <RBtn text="Print" onClick={() => window.api?.print?.pdf ? window.api.print.pdf() : window.print()} />
+              <RBtn text="Print" onClick={() => void handlePrint()} />
               <span style={{ fontSize: 9, color: 'var(--text-muted)' }}>Ctrl+P</span>
             </RibbonGroup>
             <RibbonGroup label="Text Recognition">
@@ -563,8 +700,8 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <RBtn text="Sign &amp; Certify" onClick={() => setShowSign(true)} />
               <RBtn text="Verify Signatures" onClick={() => setShowSign(true)} />
             </RibbonGroup>
-            <RibbonGroup label="Time Stamp">
-              <RBtn text="Time Stamp" active={ui.tool === 'fill_timestamp'} onClick={() => ui.setTool('fill_timestamp')} />
+            <RibbonGroup label="Visible Stamp">
+              <RBtn text="Visible Timestamp" active={ui.tool === 'fill_timestamp'} onClick={() => ui.setTool('fill_timestamp')} />
             </RibbonGroup>
           </>
         )}
@@ -788,6 +925,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
       {showPageSize && <PageSizeDialog tabId={tabId} onClose={() => setShowPageSize(false)} />}
       {showAdvanced && <PdfAdvancedDialog tabId={tabId} onClose={() => setShowAdvanced(false)} />}
       {showSnipPin && <SnipPinDialog tabId={tabId} onClose={() => setShowSnipPin(false)} />}
+      {showFindRedact && <SearchAndRedactDialog tabId={tabId} onClose={() => setShowFindRedact(false)} />}
       {showBatchPrint && <BatchDialog mode="print" onClose={() => setShowBatchPrint(false)} />}
       {showBatchRename && <BatchDialog mode="rename" onClose={() => setShowBatchRename(false)} />}
       {showBatchOcr && <BatchDialog mode="ocr" onClose={() => setShowBatchOcr(false)} />}
@@ -798,10 +936,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
       {showOptimizerAudit && <OptimizerAuditDialog tabId={tabId} onClose={() => setShowOptimizerAudit(false)} />}
       {showInitialView && <InitialViewDialog tabId={tabId} onClose={() => setShowInitialView(false)} />}
       {showAutoDetect && <AutoDetectFieldsDialog tabId={tabId} onClose={() => setShowAutoDetect(false)} />}
-      {showVisualCompare && (() => {
-        const st = useFS.getState().data[tabId] as PdfFormatState | undefined
-        return st ? <VisualCompareDialog leftBytes={st.pdfBytes} onClose={() => setShowVisualCompare(false)} /> : null
-      })()}
+      {showVisualCompare && <VisualCompareDialog tabId={tabId} onClose={() => setShowVisualCompare(false)} />}
       {showMetadata && <MetadataDialog tabId={tabId} onClose={() => setShowMetadata(false)} />}
       {showSplit && <SplitDialog tabId={tabId} onClose={() => setShowSplit(false)} />}
       {showPageNumbers && <PageNumbersDialog tabId={tabId} onClose={() => setShowPageNumbers(false)} />}
@@ -836,10 +971,13 @@ function RibbonGroup({ label, children }: { label: string; children: React.React
 // focus away from an in-edit Fabric Textbox. Without this, clicking e.g.
 // the B button while typing exits editing mode and can feel like the
 // textbox "deselected".
-const preventFocusSteal = (e: React.MouseEvent<HTMLButtonElement>) => e.preventDefault()
+const preventFocusSteal = (
+  e: React.MouseEvent<HTMLButtonElement> | React.PointerEvent<HTMLButtonElement>,
+) => e.preventDefault()
 
-function RBtn({ text, active, onClick, color, small, title, icon, bold: _bold, italic: _italic }: {
+function RBtn({ text, active, onClick, color, small, title, icon, bold: _bold, italic: _italic, 'data-testid': testid }: {
   text: string; active?: boolean; onClick?: () => void; color?: string; small?: boolean; title?: string; bold?: boolean; italic?: boolean
+  'data-testid'?: string
   /** Explicit icon name to render above the label. Overrides label-based
    *  auto-lookup. Pass `null` (or the literal string `"none"`) to force
    *  text-only rendering for a button that the auto-lookup would
@@ -861,8 +999,10 @@ function RBtn({ text, active, onClick, color, small, title, icon, bold: _bold, i
     <button
       type="button"
       onClick={onClick}
+      onPointerDown={preventFocusSteal}
       onMouseDown={preventFocusSteal}
       title={title ?? text}
+      data-testid={testid}
       className={`rbtn${active ? ' active' : ''}${small ? ' rbtn-small' : ''}${Icon ? ' rbtn-tile' : ''}`}
       style={color && !active ? { color } : undefined}
     >
@@ -923,18 +1063,23 @@ function ImportFontButton() {
   )
 }
 
-function MiniBtn({ text, active, onClick, bold, italic }: {
-  text: string; active?: boolean; onClick?: () => void; bold?: boolean; italic?: boolean
+function MiniBtn({ text, active, onClick, bold, italic, underline, strike, testId }: {
+  text: string; active?: boolean; onClick?: () => void; bold?: boolean; italic?: boolean; underline?: boolean; strike?: boolean; testId?: string
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      onPointerDown={preventFocusSteal}
       onMouseDown={preventFocusSteal}
+      data-testid={testId}
       className={`rminibtn${active ? ' active' : ''}`}
       style={{
         fontWeight: bold ? 700 : 600,
         fontStyle: italic ? 'italic' : 'normal',
+        textDecorationLine: [underline ? 'underline' : '', strike ? 'line-through' : '']
+          .filter(Boolean)
+          .join(' ') || 'none',
       }}
     >
       {text}

@@ -135,6 +135,17 @@ export function buildBodyReplaceEditsFromParagraphs(
       fontFamily: p.fontFamily,
       bold: p.bold,
       italic: p.italic,
+      // Session 5: layout metadata rides every edit origin so the save
+      // seam can preserve detected alignment (or record its loss) and
+      // keep the R5b font-recovery state without a save-time recluster.
+      layoutRole: p.layout?.role,
+      layoutSafeForAutoReflow: p.layout?.safeForAutoReflow,
+      layoutFlowId: p.layout?.flowId,
+      layoutReasons: p.layout?.reasons ? [...p.layout.reasons] : undefined,
+      // Both tri-state: undefined = unknown, must survive to the seam.
+      layoutDetectedAlign: p.layout?.align,
+      layoutWeakCenterEvidence: p.layout?.weakCenterEvidence,
+      fontFamilyIsGenericFallback: p.fontFamilyIsGenericFallback,
     })
   }
   return out

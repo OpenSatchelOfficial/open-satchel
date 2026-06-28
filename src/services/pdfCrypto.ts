@@ -5,7 +5,7 @@
 // Audited 2026-04-18 (see PARITY_GAP_REPORT.md); pinned to 2.7.6.
 //
 // The Tauri/browser split doesn't matter for encryption — no network
-// calls — so this works in both Tauri and browser-mode
+// calls — so this works in both Tauri and the zenlink browser-mode
 // shim.
 //
 // permissions: zgapdfsigner's `permissions` array is a BLOCKLIST —
@@ -23,6 +23,7 @@
 // zga array as an allowlist, producing PDFs whose /P bits were the
 // opposite of what the user checked in the dialog.
 
+import { PDFDocument, PDFDict, PDFName, PDFNumber } from 'pdf-lib'
 import { getZga } from './zgaLoader'
 import { upgradeR5ToR6 } from './pdfCryptoR6'
 
@@ -148,6 +149,74 @@ export function isEncrypted(bytes: Uint8Array): boolean {
   const tail = bytes.subarray(Math.max(0, bytes.length - 4096))
   const text = new TextDecoder('latin1').decode(tail)
   return /\/Encrypt\b/.test(text)
+}
+
+/** The /Encrypt policy read off an encrypted PDF *before* we decrypt it,
+ *  so a re-save can re-apply the SAME permission bits instead of silently
+ *  resetting them to all-allowed (the gauntlet C residual). `permissions`
+ *  maps each PDF /P bit to a PermissionFlags boolean (granted → true);
+ *  `hasUserPassword` is true when /U-style protection requires a password
+ *  just to open (used to detect a password-model change on re-save). */
+export interface EncryptionPolicy {
+  permissions: PermissionFlags
+  /** raw /P integer (signed 32-bit) as stored in the /Encrypt dict */
+  pBits: number
+  /** /R revision (2,3,4,5,6) — null if unreadable */
+  revision: number | null
+  /** /V version — null if unreadable */
+  version: number | null
+}
+
+/** Read the permission policy (/P bits) from an encrypted PDF's /Encrypt
+ *  dict WITHOUT needing the password. pd-lib's `ignoreEncryption` lets us
+ *  walk the trailer + dict (the /P int is cleartext; only streams/strings
+ *  are ciphertext). Returns null when there is no /Encrypt dict or /P is
+ *  unreadable — callers then fall back to "no explicit restrictions".
+ *
+ *  PDF /P bit map (ISO 32000-1 Table 22, 1-indexed bits):
+ *    b3 print, b4 modify, b5 copy/extract, b6 annot/forms,
+ *    b9 fill-forms, b10 extract-for-a11y, b11 assemble, b12 print-high.
+ *  A bit SET = that operation is GRANTED. */
+export async function readEncryptionPolicy(
+  bytes: Uint8Array,
+): Promise<EncryptionPolicy | null> {
+  try {
+    const doc = await PDFDocument.load(bytes, {
+      throwOnInvalidObject: false,
+      ignoreEncryption: true,
+      updateMetadata: false,
+    })
+    const ctx = doc.context
+    const encryptRef = ctx.trailerInfo.Encrypt
+    if (!encryptRef) return null
+    const encDict = ctx.lookup(encryptRef)
+    if (!(encDict instanceof PDFDict)) return null
+    const pVal = encDict.get(PDFName.of('P'))
+    const P = pVal instanceof PDFNumber ? pVal.asNumber() : null
+    if (P == null) return null
+    const rVal = encDict.get(PDFName.of('R'))
+    const vVal = encDict.get(PDFName.of('V'))
+    // Granted iff the bit is set. (1<<n is 0-indexed: PDF b3 = 1<<2.)
+    const has = (mask: number) => (P & mask) !== 0
+    const permissions: PermissionFlags = {
+      print: has(4), // b3
+      modify: has(8), // b4
+      copy: has(16), // b5 copy/extract
+      annotForms: has(32), // b6
+      fillForms: has(256), // b9
+      extract: has(512), // b10
+      assemble: has(1024), // b11
+      printHigh: has(2048), // b12
+    }
+    return {
+      permissions,
+      pBits: P,
+      revision: rVal instanceof PDFNumber ? rVal.asNumber() : null,
+      version: vVal instanceof PDFNumber ? vVal.asNumber() : null,
+    }
+  } catch {
+    return null
+  }
 }
 
 /** G4: produce a clean, unencrypted copy of an encrypted PDF.

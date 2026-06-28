@@ -7,15 +7,15 @@
 // Browser runtime (`npm run dev` hit from Chrome/Zen/anywhere): swaps
 // in in-browser fallbacks so the entire PDF editor runs without Tauri.
 // File open uses <input type="file">, save triggers a blob download,
-// recent files live in localStorage, etc. Useful for manual browser
-// checks against `http://localhost:1420/`
+// recent files live in localStorage, etc. Lets us drive the app with
+// zenlink/Playwright/manual testing against `http://localhost:1420/`
 // without spinning up Tauri for every iteration.
 //
 // The ported PDF codebase (formats/pdf/**, services/*) only ever talks
 // to `window.api.*`. This file is the only place that knows which
 // runtime we're in; every other file stays runtime-agnostic.
 //
-// Browser-mode helpers exposed on window only:
+// Test automation helpers exposed on window in browser mode only:
 //   window.__loadTestPdf(path): fetch+open a PDF from Vite's public dir
 //   window.__lastSave:          Uint8Array of the most recent saveAs call
 //   window.__lastSavedName:     the file name from the most recent saveAs
@@ -128,13 +128,13 @@ const tauriFile = {
     // dynamic-import cost (measured ~3s in dev with HMR + chunks).
     await fsWriteFile(path, bytes)
   },
-  async saveAs(bytes: Uint8Array): Promise<string | null> {
+  async saveAs(bytes: Uint8Array, suggestedName?: string): Promise<string | null> {
     // Pick the path via the dedicated `pick_save_path` Rust command
     // (returns the chosen path with no write), then route the write
     // through plugin-fs.writeFile to bypass the JSON-array marshal.
     // Same rationale as `save` above.
     const picked = await invoke<string | null>('pick_save_path', {
-      suggestedName: null,
+      suggestedName: suggestedName ?? null,
     })
     if (!picked) return null
     await fsWriteFile(picked, bytes)
@@ -340,18 +340,23 @@ async function fileToPair(f: File): Promise<FilePair> {
 }
 
 function downloadBytes(bytes: Uint8Array, name: string): string {
-  // Stash bytes so browser-mode saveAs can reuse the latest file name.
+  // Stash bytes unconditionally — zenlink/playwright read __lastSave to
+  // assert exact output.
   ;(globalThis as unknown as { __lastSave?: Uint8Array; __lastSavedName?: string }).__lastSave = bytes
   ;(globalThis as unknown as { __lastSavedName?: string }).__lastSavedName = name
 
   // Suppress the blob-download anchor when running under automation.
+  // The download gesture can knock extensions (zenlink's content script)
+  // off the tab with a "missing host permission" error on the next call.
   // Flip to true from the console (or set localStorage.silentSave=1) to
   // keep saves silent during interactive debugging too.
+  const silentByBridge = typeof (globalThis as unknown as { __claudeBridgeVersion?: unknown })
+    .__claudeBridgeVersion !== 'undefined'
   const silentByLS = (() => {
     try { return localStorage.getItem('silentSave') === '1' } catch { return false }
   })()
   const silentByGlobal = !!(globalThis as unknown as { __silentSave?: boolean }).__silentSave
-  if (silentByLS || silentByGlobal) return name
+  if (silentByBridge || silentByLS || silentByGlobal) return name
 
   const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/octet-stream' })
   const url = URL.createObjectURL(blob)
@@ -387,8 +392,10 @@ const browserFile = {
     const name = path.split(/[/\\]/).pop() || 'document.pdf'
     downloadBytes(bytes, name)
   },
-  async saveAs(bytes: Uint8Array): Promise<string | null> {
-    const name = (globalThis as unknown as { __lastSavedName?: string }).__lastSavedName || `document-${Date.now()}.pdf`
+  async saveAs(bytes: Uint8Array, suggestedName?: string): Promise<string | null> {
+    const name = suggestedName
+      || (globalThis as unknown as { __lastSavedName?: string }).__lastSavedName
+      || `document-${Date.now()}.pdf`
     downloadBytes(bytes, name)
     return name
   },
@@ -565,9 +572,9 @@ if (typeof window !== 'undefined') {
       await openFromPath(fileResult.path, fileResult.bytes)
       void name
     }
-    // One-line env tag for browser-mode checks.
+    // One-line env tag for console / zenlink to verify mode.
     console.info(
-      `%cOpen Satchel: browser mode — file ops go to <input type="file"> + downloads; recent files in localStorage.`,
+      `%cOpen Satchel: browser mode (zenlink/dev testing) — file ops go to <input type="file"> + downloads; recent files in localStorage.`,
       'color:#3b82f6',
     )
   }

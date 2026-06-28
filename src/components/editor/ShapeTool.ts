@@ -2,6 +2,60 @@ import { Canvas, Rect, Ellipse, Line, type TPointerEventInfo } from 'fabric'
 
 export type ShapeType = 'rectangle' | 'circle' | 'line' | 'arrow'
 
+const baseLineRender = (Line.prototype as unknown as {
+  _render(this: Line, ctx: CanvasRenderingContext2D): void
+})._render
+
+export function decorateArrowLine(line: Line): Line {
+  const target = line as Line & {
+    __isArrow?: boolean
+    __openSatchelArrowDecorated?: boolean
+    stroke?: unknown
+    strokeWidth?: number
+    calcLinePoints: () => { x1: number; y1: number; x2: number; y2: number }
+    _render: (ctx: CanvasRenderingContext2D) => void
+  }
+  target.__isArrow = true
+  if (target.__openSatchelArrowDecorated) return line
+  target.__openSatchelArrowDecorated = true
+  target._render = function renderOpenSatchelArrow(ctx: CanvasRenderingContext2D) {
+    baseLineRender.call(this, ctx)
+    if (!this.__isArrow) return
+
+    const p = this.calcLinePoints()
+    const dx = p.x2 - p.x1
+    const dy = p.y2 - p.y1
+    const lineLen = Math.hypot(dx, dy)
+    if (lineLen < 2) return
+
+    const angle = Math.atan2(dy, dx)
+    const headLen = Math.min(Math.max((this.strokeWidth || 1) * 4.5, 10), lineLen * 0.45)
+    const wing = Math.PI / 6
+
+    ctx.save()
+    ctx.beginPath()
+    ctx.moveTo(p.x2, p.y2)
+    ctx.lineTo(p.x2 - headLen * Math.cos(angle - wing), p.y2 - headLen * Math.sin(angle - wing))
+    ctx.moveTo(p.x2, p.y2)
+    ctx.lineTo(p.x2 - headLen * Math.cos(angle + wing), p.y2 - headLen * Math.sin(angle + wing))
+    ctx.lineWidth = this.strokeWidth || 1
+    if (typeof this.stroke === 'string') ctx.strokeStyle = this.stroke
+    ctx.lineCap = 'round'
+    ctx.lineJoin = 'round'
+    ctx.stroke()
+    ctx.restore()
+  }
+  return line
+}
+
+export function decorateArrowLines(canvas: Canvas): void {
+  canvas.getObjects().forEach((obj) => {
+    if ((obj as any).__isArrow && String(obj.type).toLowerCase() === 'line') {
+      decorateArrowLine(obj as Line)
+    }
+  })
+}
+
 export function applyShapeTool(
   canvas: Canvas,
   shapeType: ShapeType,
@@ -19,6 +73,7 @@ export function applyShapeTool(
 
   canvas.on('mouse:down', (e: TPointerEventInfo) => {
     if (e.target) return
+    ;(canvas as any).__dragCreateActive = true
     const pointer = canvas.getScenePoint(e.e)
     startX = pointer.x
     startY = pointer.y
@@ -42,7 +97,7 @@ export function applyShapeTool(
           stroke: color, strokeWidth, selectable: true,
           strokeLineCap: 'round'
         })
-        ;(shape as any).__isArrow = shapeType === 'arrow'
+        if (shapeType === 'arrow') decorateArrowLine(shape)
         break
     }
 
@@ -80,6 +135,14 @@ export function applyShapeTool(
   })
 
   canvas.on('mouse:up', () => {
+    ;(canvas as any).__dragCreateActive = false
+    if (shape) {
+      const tooSmall =
+        shapeType === 'rectangle' ? (shape.width || 0) < 5 || (shape.height || 0) < 5 :
+          shapeType === 'circle' ? (shape.rx || 0) < 3 || (shape.ry || 0) < 3 :
+            Math.hypot((shape.x2 || 0) - (shape.x1 || 0), (shape.y2 || 0) - (shape.y1 || 0)) < 5
+      if (tooSmall) canvas.remove(shape)
+    }
     shape = null
     onSave()
   })

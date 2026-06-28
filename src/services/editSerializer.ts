@@ -12,6 +12,7 @@ import {
 } from './contentStreamParser'
 import { buildGlyphMaps, encodeWithGlyphMap } from './cmapResolver'
 import type { HeaderFooterConfig } from '../formats/pdf/index'
+import type { SaveDegradationCollector } from './saveDegradations'
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -23,6 +24,24 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
     g: parseInt(result[2], 16) / 255,
     b: parseInt(result[3], 16) / 255
   }
+}
+
+async function imageSourceToBytes(src: string): Promise<Uint8Array> {
+  if (src.startsWith('data:')) {
+    const comma = src.indexOf(',')
+    if (comma < 0) throw new Error('Invalid image data URL')
+    const meta = src.slice(0, comma)
+    const body = src.slice(comma + 1)
+    const binary = meta.includes(';base64')
+      ? atob(body)
+      : decodeURIComponent(body)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+  const response = await fetch(src)
+  const arrayBuf = await response.arrayBuffer()
+  return new Uint8Array(arrayBuf)
 }
 
 // ── Font Management ──────────────────────────────────────────────
@@ -118,6 +137,9 @@ function collectGlyphsPerFont(pages: any[]): Map<string, string> {
 export interface SerializeOptions {
   encryption?: { userPassword: string; ownerPassword: string }
   headerFooter?: HeaderFooterConfig
+  /** Session-1 degradation channel. When present, silent edit-drop
+   *  sites in this pass record instead of `continue`-ing invisibly. */
+  collector?: SaveDegradationCollector
 }
 
 function pruneUnreachablePdfObjects(pdfDoc: PDFDocument): void {
@@ -175,6 +197,10 @@ export async function serializeEditsToPdf(
     pdfDoc.registerFontkit(fontkit as any)
   } catch {
     // fontkit may fail in some environments, continue with standard fonts
+    options?.collector?.record({
+      area: 'font.embed_resolution_failed',
+      detail: 'fontkit registration failed in the serializer pass; custom fonts unavailable, standard fonts used',
+    })
   }
 
   // ── Page-structure pass: deletes + inserts (blank) + duplicates ──
@@ -306,7 +332,16 @@ export async function serializeEditsToPdf(
     if (i >= pdfDoc.getPageCount()) break
 
     const streamData = getPageContentBytes(pdfDoc, i)
-    if (!streamData) continue
+    if (!streamData) {
+      // Whole page's text edits silently vanish here — a data-loss
+      // site found by the Session-1 preflight audit. Record it.
+      options?.collector?.record({
+        area: 'serializer.text_edit_dropped',
+        detail: `page ${i}: no readable content stream; ${textEdits.length} text edit(s) dropped`,
+        pageIndex: i,
+      })
+      continue
+    }
 
     const parsed = parseContentStream(streamData.bytes)
     let modified = false
@@ -316,7 +351,14 @@ export async function serializeEditsToPdf(
       // pdfjs textDivs are in the same order as getTextContent() items,
       // which correspond 1:1 to our parsed textRuns (sequential Tj/TJ ops)
       const run = parsed.textRuns[edit.spanIndex]
-      if (!run) continue
+      if (!run) {
+        options?.collector?.record({
+          area: 'serializer.text_edit_dropped',
+          detail: `page ${i}: span ${edit.spanIndex} has no matching content-stream run; edit dropped`,
+          pageIndex: i,
+        })
+        continue
+      }
 
       const newBytes = encodeTextToBytes(edit.newText)
       applyTextReplacement(parsed, run.opIndex, newBytes, run.tjElementIndex)
@@ -343,7 +385,14 @@ export async function serializeEditsToPdf(
     if (editBlocks.length === 0) continue
 
     const streamData = getPageContentBytes(pdfDoc, i)
-    if (!streamData) continue
+    if (!streamData) {
+      options?.collector?.record({
+        area: 'serializer.text_edit_dropped',
+        detail: `page ${i}: no readable content stream; ${editBlocks.length} legacy edit_text block(s) dropped`,
+        pageIndex: i,
+      })
+      continue
+    }
 
     const parsed = parseContentStream(streamData.bytes)
 
@@ -365,13 +414,27 @@ export async function serializeEditsToPdf(
         encoded = encodeTextToBytes(block.text)
       }
 
-      if (!encoded) continue
+      if (!encoded) {
+        options?.collector?.record({
+          area: 'serializer.text_edit_dropped',
+          detail: `page ${i}: legacy edit_text block could not be encoded; edit dropped`,
+          pageIndex: i,
+        })
+        continue
+      }
 
       // Apply replacement to each matched operator
       for (let j = 0; j < opIndices.length; j++) {
         const opIdx = opIndices[j]
         const run = runs[j]
-        if (!run) continue
+        if (!run) {
+          options?.collector?.record({
+            area: 'serializer.text_edit_dropped',
+            detail: `page ${i}: legacy edit_text block operator ${j} has no matching run; partial edit`,
+            pageIndex: i,
+          })
+          continue
+        }
 
         // For multi-run blocks (text split across operators), we put
         // the full edited text in the first operator and clear the rest
@@ -391,10 +454,12 @@ export async function serializeEditsToPdf(
   // Apply fabric edits (skip __editTextBlock objects — they're now in the content stream)
   for (let i = 0; i < activePages.length; i++) {
     const pageState = activePages[i]
-    if (!pageState.fabricJSON) continue
     if (i >= pdfDoc.getPageCount()) break
 
     const pdfPage = pdfDoc.getPage(i)
+    removeStickyTextAnnotations(pdfPage, pageState._nativeStickyNotes || [])
+
+    if (!pageState.fabricJSON) continue
     const { width: pdfW, height: pdfH } = pdfPage.getSize()
 
     const canvasWidth = pdfW * zoom
@@ -432,6 +497,10 @@ export async function serializeEditsToPdf(
         const field = form.getFields().find((f) => f.getName() === fieldName)
         if (!field) {
           console.warn(`[editSerializer] form field "${fieldName}" not found — skipping`)
+          options?.collector?.record({
+            area: 'serializer.form_value_dropped',
+            detail: `form field "${fieldName}" not found in document; the entered value was dropped`,
+          })
           continue
         }
         // Track whether ANY value has codepoints WinAnsi can't encode.
@@ -486,6 +555,10 @@ export async function serializeEditsToPdf(
                   `[editSerializer] form field "${fieldName}" text length ` +
                     `${text.length} exceeds declared MaxLen ${max} — Acrobat will truncate on display.`,
                 )
+                options?.collector?.record({
+                  area: 'serializer.form_value_truncated',
+                  detail: `form field "${fieldName}": entered ${text.length} chars exceeds MaxLen ${max}; viewers will truncate on display`,
+                })
               }
               const stored = field.getText()
               if (stored !== text) {
@@ -493,6 +566,10 @@ export async function serializeEditsToPdf(
                   `[editSerializer] form field "${fieldName}" stored != input ` +
                     `(stored.length=${stored?.length}, input.length=${text.length}) — pd-lib may have truncated.`,
                 )
+                options?.collector?.record({
+                  area: 'serializer.form_value_truncated',
+                  detail: `form field "${fieldName}": stored value differs from input (stored=${stored?.length ?? 0} chars, input=${text.length}); pd-lib may have truncated`,
+                })
               }
             } catch {
               /* getMaxLength / getText edge — ignore */
@@ -502,12 +579,20 @@ export async function serializeEditsToPdf(
               `[editSerializer] unsupported form field type for "${fieldName}":`,
               field.constructor?.name ?? typeof field,
             )
+            options?.collector?.record({
+              area: 'serializer.form_value_dropped',
+              detail: `form field "${fieldName}" has an unsupported type (${field.constructor?.name ?? typeof field}); the entered value was dropped`,
+            })
           }
         } catch (err) {
           console.warn(
             `[editSerializer] failed to apply form value for "${fieldName}":`,
             (err as Error).message,
           )
+          options?.collector?.record({
+            area: 'serializer.form_value_dropped',
+            detail: `form value for "${fieldName}" could not be applied (${(err as Error).message}); the entered value was dropped`,
+          })
         }
       }
     }
@@ -608,6 +693,10 @@ export async function serializeEditsToPdf(
           '[editSerializer] could not embed Unicode form font; falling back to default appearance pass:',
           (err as Error).message,
         )
+        options?.collector?.record({
+          area: 'font.embed_resolution_failed',
+          detail: `Unicode form font could not be embedded (${(err as Error).message}); non-Latin form text may render incorrectly`,
+        })
       }
     }
   } catch {
@@ -675,6 +764,203 @@ function addLinkAnnotation(
   }
 }
 
+function appendPageAnnotation(pdfDoc: PDFDocument, page: PDFPage, annotDict: PDFDict): PDFRef {
+  const ctx = pdfDoc.context
+  const annotRef = ctx.register(annotDict)
+  const existing = page.node.get(PDFName.of('Annots'))
+  if (existing instanceof PDFArray) {
+    existing.push(annotRef)
+  } else {
+    const arr = PDFArray.withContext(ctx)
+    arr.push(annotRef)
+    page.node.set(PDFName.of('Annots'), arr)
+  }
+  return annotRef
+}
+
+function addStickyTextAnnotation(
+  pdfDoc: PDFDocument,
+  page: PDFPage,
+  rect: [number, number, number, number],
+  contents: string,
+  author: string,
+  color: string,
+  id?: string,
+): PDFRef {
+  const ctx = pdfDoc.context
+  const c = hexToRgb(color)
+  const annot = ctx.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: rect,
+    Contents: PDFString.of(contents || ''),
+    T: PDFString.of(author || 'You'),
+    ...(id ? { NM: PDFString.of(id) } : {}),
+    Name: 'Comment',
+    Open: false,
+    C: [c.r, c.g, c.b],
+    F: 4,
+  }) as PDFDict
+  return appendPageAnnotation(pdfDoc, page, annot)
+}
+
+interface StickyReply {
+  id?: string
+  body: string
+  author?: string
+}
+
+function addStickyReplyAnnotation(
+  pdfDoc: PDFDocument,
+  page: PDFPage,
+  rect: [number, number, number, number],
+  reply: StickyReply,
+  parentRef: PDFRef,
+  color: string,
+): PDFRef {
+  const ctx = pdfDoc.context
+  const c = hexToRgb(color)
+  const annot = ctx.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: rect,
+    Contents: PDFString.of(reply.body || ''),
+    T: PDFString.of(reply.author || 'You'),
+    ...(reply.id ? { NM: PDFString.of(reply.id) } : {}),
+    Name: 'Comment',
+    Open: false,
+    C: [c.r, c.g, c.b],
+    F: 4,
+    IRT: parentRef,
+    RT: PDFName.of('R'),
+  }) as PDFDict
+  return appendPageAnnotation(pdfDoc, page, annot)
+}
+
+function extractStickyReplies(obj: any): StickyReply[] {
+  if (!Array.isArray(obj.__replies)) return []
+  return obj.__replies
+    .filter((reply: any) => reply && typeof reply === 'object' && typeof reply.body === 'string')
+    .map((reply: any) => ({
+      id: typeof reply.id === 'string' ? reply.id : undefined,
+      body: reply.body,
+      author: typeof reply.author === 'string' ? reply.author : 'You',
+    }))
+}
+
+function extractGroupText(obj: any): string {
+  if (typeof obj.__contents === 'string') return obj.__contents
+  if (typeof obj.text === 'string') return obj.text
+  const children = Array.isArray(obj.objects) ? obj.objects : []
+  for (const child of children) {
+    if (child && typeof child === 'object' && typeof child.text === 'string') {
+      return child.text
+    }
+  }
+  return ''
+}
+
+function pdfTextValue(value: unknown): string {
+  if (!value) return ''
+  const v = value as { decodeText?: () => string; asString?: () => string }
+  try {
+    if (typeof v.decodeText === 'function') return v.decodeText()
+    if (typeof v.asString === 'function') return v.asString()
+  } catch {
+    return ''
+  }
+  return String(value).replace(/^\((.*)\)$/s, '$1')
+}
+
+function pdfNumberValue(value: unknown): number | null {
+  if (value == null) return null
+  const v = value as { asNumber?: () => number; numberValue?: number }
+  if (typeof v.asNumber === 'function') {
+    const n = v.asNumber()
+    return Number.isFinite(n) ? n : null
+  }
+  if (typeof v.numberValue === 'number') return v.numberValue
+  const n = Number(String(value))
+  return Number.isFinite(n) ? n : null
+}
+
+function annotRect(annot: PDFDict): [number, number, number, number] | null {
+  const arr = annot.lookup(PDFName.of('Rect'), PDFArray)
+  if (!arr || arr.size() < 4) return null
+  const nums = [0, 1, 2, 3].map((idx) => pdfNumberValue(arr.lookup(idx)))
+  if (nums.some((n) => n == null)) return null
+  return nums as [number, number, number, number]
+}
+
+function rectClose(a?: number[], b?: number[]): boolean {
+  if (!a || !b || a.length < 4 || b.length < 4) return false
+  return a.slice(0, 4).every((n, idx) => Math.abs(n - b[idx]) < 0.5)
+}
+
+function stickySnapshotMatches(annot: PDFDict, snapshot: any): boolean {
+  if (annot.get(PDFName.of('IRT'))) return false
+  const nm = pdfTextValue(annot.get(PDFName.of('NM')))
+  if (snapshot?.id && nm && nm === snapshot.id) return true
+  if (snapshot?.hadName) return false
+  const rect = annotRect(annot)
+  const contents = pdfTextValue(annot.get(PDFName.of('Contents')))
+  const author = pdfTextValue(annot.get(PDFName.of('T')))
+  return rectClose(rect ?? undefined, snapshot?.rectPdf) &&
+    contents === (snapshot?.contents ?? '') &&
+    author === (snapshot?.author ?? '')
+}
+
+function pdfObjectKey(value: unknown): string {
+  return value ? String(value) : ''
+}
+
+function removeStickyTextAnnotations(page: PDFPage, snapshots: any[] = []): void {
+  if (!snapshots.length) return
+  const annots = page.node.lookup(PDFName.of('Annots'), PDFArray)
+  if (!annots) return
+
+  const parentRefsToRemove = new Set<string>()
+  for (let i = 0; i < annots.size(); i++) {
+    const annot = annots.lookup(i, PDFDict)
+    if (!annot) continue
+    if (annot.get(PDFName.of('Subtype'))?.toString() !== '/Text') continue
+    if (snapshots.some((snapshot) => stickySnapshotMatches(annot, snapshot))) {
+      const refKey = pdfObjectKey(annots.get(i))
+      if (refKey) parentRefsToRemove.add(refKey)
+    }
+  }
+
+  for (let i = annots.size() - 1; i >= 0; i--) {
+    const annot = annots.lookup(i, PDFDict)
+    if (!annot) continue
+    if (annot.get(PDFName.of('Subtype'))?.toString() !== '/Text') continue
+    const ownRef = pdfObjectKey(annots.get(i))
+    const replyToRef = pdfObjectKey(annot.get(PDFName.of('IRT')))
+    if (
+      snapshots.some((snapshot) => stickySnapshotMatches(annot, snapshot)) ||
+      (!!ownRef && parentRefsToRemove.has(ownRef)) ||
+      (!!replyToRef && parentRefsToRemove.has(replyToRef))
+    ) {
+      annots.remove(i)
+    }
+  }
+}
+
+function stickySnapshotFromObject(obj: any): any {
+  const snapshot = obj.__nativeStickySnapshot
+  return {
+    id: obj.__id,
+    hadName: true,
+    rectPdf: snapshot?.rectPdf,
+    contents: snapshot?.contents,
+    author: snapshot?.author,
+  }
+}
+
+function isStickyNoteObject(obj: any): boolean {
+  return !!(obj && (obj.__isStickyNote || obj.__kind === 'sticky_note'))
+}
+
 // ── Render Fabric Objects to PDF ─────────────────────────────────
 
 async function renderFabricObject(
@@ -684,6 +970,35 @@ async function renderFabricObject(
   mapper: ReturnType<typeof createCoordinateMapper>,
   glyphMap: Map<string, string>
 ): Promise<void> {
+  if (isStickyNoteObject(obj)) {
+    const left = obj.left || 0
+    const top = obj.top || 0
+    const w = (obj.width || 18) * (obj.scaleX || 1)
+    const h = (obj.height || 18) * (obj.scaleY || 1)
+    const pos = mapper.fabricToPdf(left, top + h)
+    removeStickyTextAnnotations(page, [stickySnapshotFromObject(obj)])
+    const rect: [number, number, number, number] = [
+      pos.x,
+      pos.y,
+      pos.x + mapper.scaleToPdf(w),
+      pos.y + mapper.sizeToPdf(h),
+    ]
+    const color = obj.__color || obj.fill || '#f9e2af'
+    const parentRef = addStickyTextAnnotation(
+      pdfDoc,
+      page,
+      rect,
+      extractGroupText(obj),
+      obj.__author || 'You',
+      color,
+      obj.__id,
+    )
+    for (const reply of extractStickyReplies(obj)) {
+      addStickyReplyAnnotation(pdfDoc, page, rect, reply, parentRef, color)
+    }
+    return
+  }
+
   // Fabric v6 emits PascalCase types (Path, Rect, Image, Group, Textbox,
   // IText, Circle, Ellipse, Line, Polygon, Polyline, Triangle). Older
   // Fabric and our legacy-serialized JSON used lowercase (path, rect,
@@ -849,6 +1164,7 @@ async function renderFabricObject(
       break
     }
 
+    case 'Ellipse':
     case 'ellipse': {
       const rx = (obj.rx || 0) * (obj.scaleX || 1)
       const ry = (obj.ry || 0) * (obj.scaleY || 1)
@@ -872,6 +1188,7 @@ async function renderFabricObject(
       break
     }
 
+    case 'Line':
     case 'line': {
       const x1 = obj.x1 ?? 0
       const y1 = obj.y1 ?? 0
@@ -922,7 +1239,7 @@ async function renderFabricObject(
 
     case 'Group':
     case 'group': {
-      // Rasterize groups (stamps, sticky notes) to PNG and embed
+      // Rasterize visual groups such as stamps to PNG and embed.
       try {
         const left = obj.left || 0
         const top = obj.top || 0
@@ -932,6 +1249,7 @@ async function renderFabricObject(
         const offscreen = new OffscreenCanvas(Math.ceil(w) + 4, Math.ceil(h) + 4)
         const ctx = offscreen.getContext('2d')!
         ctx.globalAlpha = obj.opacity ?? 1
+        ctx.translate(2, 2)
 
         // Render group children
         if (obj.objects) {
@@ -960,11 +1278,10 @@ async function renderFabricObject(
 
     case 'Image':
     case 'image': {
-      if (!obj.src) break
+      const imageSrc = obj.__imageDataUrl || obj.src
+      if (!imageSrc) break
       try {
-        const response = await fetch(obj.src)
-        const arrayBuf = await response.arrayBuffer()
-        const bytes = new Uint8Array(arrayBuf)
+        const bytes = await imageSourceToBytes(imageSrc)
 
         let image
         if (bytes[0] === 0x89 && bytes[1] === 0x50) {
@@ -1078,39 +1395,56 @@ function renderGroupChild(
   groupScaleX: number,
   groupScaleY: number
 ): void {
-  const cx = (child.left || 0) + groupW / 2
-  const cy = (child.top || 0) + groupH / 2
+  const scaleX = (child.scaleX || 1) * groupScaleX
+  const scaleY = (child.scaleY || 1) * groupScaleY
+  const left = ((child.left || 0) + groupW / 2) * groupScaleX
+  const top = ((child.top || 0) + groupH / 2) * groupScaleY
 
   ctx.save()
 
   if (child.angle) {
-    ctx.translate(cx, cy)
+    const w = (child.width || 0) * scaleX
+    const h = (child.height || child.fontSize || 0) * scaleY
+    ctx.translate(left + w / 2, top + h / 2)
     ctx.rotate((child.angle * Math.PI) / 180)
-    ctx.translate(-cx, -cy)
+    ctx.translate(-(left + w / 2), -(top + h / 2))
   }
 
   if (child.type === 'rect' || child.type === 'Rect') {
-    const w = (child.width || 0) * (child.scaleX || 1)
-    const h = (child.height || 0) * (child.scaleY || 1)
+    const w = (child.width || 0) * scaleX
+    const h = (child.height || 0) * scaleY
     if (child.fill && child.fill !== 'transparent') {
       ctx.fillStyle = child.fill
       ctx.globalAlpha = child.opacity ?? 1
-      ctx.fillRect(cx - w / 2, cy - h / 2, w, h)
+      ctx.fillRect(left, top, w, h)
     }
     if (child.stroke) {
       ctx.strokeStyle = child.stroke
       ctx.lineWidth = child.strokeWidth || 1
-      ctx.strokeRect(cx - w / 2, cy - h / 2, w, h)
+      ctx.strokeRect(left, top, w, h)
     }
   } else if (
     child.type === 'textbox' || child.type === 'text' ||
     child.type === 'Textbox' || child.type === 'Text' || child.type === 'IText'
   ) {
+    const w = (child.width || 0) * scaleX
+    const h = (child.height || child.fontSize || 14) * scaleY
+    const fontSize = (child.fontSize || 14) * Math.max(groupScaleX, groupScaleY)
     ctx.fillStyle = child.fill || '#000000'
-    ctx.font = `${child.fontWeight || 'normal'} ${child.fontStyle || 'normal'} ${child.fontSize || 14}px ${child.fontFamily || 'Helvetica'}`
-    ctx.textAlign = 'center'
+    ctx.font = `${child.fontWeight || 'normal'} ${child.fontStyle || 'normal'} ${fontSize}px ${child.fontFamily || 'Helvetica'}`
+    ctx.textAlign = child.textAlign || 'left'
     ctx.textBaseline = 'middle'
-    ctx.fillText(child.text || '', cx, cy)
+    const drawX =
+      ctx.textAlign === 'center' ? left + w / 2 :
+        ctx.textAlign === 'right' ? left + w :
+          left
+    const lines = String(child.text || '').split(/\r?\n/)
+    const lineHeight = fontSize * (child.lineHeight || 1.16)
+    const blockHeight = Math.max(lineHeight, lines.length * lineHeight)
+    const firstY = top + h / 2 - blockHeight / 2 + lineHeight / 2
+    lines.forEach((line, idx) => {
+      ctx.fillText(line, drawX, firstY + idx * lineHeight)
+    })
   }
 
   ctx.restore()
