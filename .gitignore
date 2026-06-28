@@ -3,6 +3,14 @@ node_modules
 dist
 dist-ssr
 *.local
+
+# EXCEPTION to the broad `dist` rule above: the vendored zgapdfsigner runtime
+# bundle lives in vendor/zgapdfsigner/dist/ and the build (vite vendor-assets
+# hook) copies it into the app's dist/ for password/cert encryption. It MUST be
+# committed or a clean checkout (CI / a fresh clone) cannot build (ENOENT on
+# the copy). Re-include the directory first, then the one file.
+!vendor/zgapdfsigner/dist/
+!vendor/zgapdfsigner/dist/zgapdfsigner.min.js
 *.tsbuildinfo
 
 # Tesseract.js auto-downloads language models to cwd at runtime.
