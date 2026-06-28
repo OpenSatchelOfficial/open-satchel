@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.5.1] — 2026-06-28
+
+### Fixed
+
+- **App icon** — the Windows executable and taskbar icon was blank/generic on
+  high-DPI displays because the bundled `.ico` carried only a single 32×32
+  image. Regenerated the full icon set (16/24/32/48/64/256) from the brand
+  mark so the icon renders crisply at every size. Same artwork, no design
+  change. Existing 0.5.0 installs receive this via the auto-updater.
+
 ## [0.5.0] — 2026-06-27
 
 Everything since the `0.1.x` public releases: a full document-integrity
