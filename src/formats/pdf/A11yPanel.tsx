@@ -101,7 +101,7 @@ export default function A11yPanel({ tabId }: Props) {
           >
             tagged: {result.stats.isTagged ? 'yes' : 'no'} · figures:{' '}
             {result.stats.figuresWithAlt}/{result.stats.figureCount} alt · headings:{' '}
-            {result.stats.headingLevels.length || '—'}
+            {result.stats.headingLevels.length || '-'}
           </div>
 
           <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 3 }}>

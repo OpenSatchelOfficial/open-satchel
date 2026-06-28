@@ -574,7 +574,7 @@ if (typeof window !== 'undefined') {
     }
     // One-line env tag for console / zenlink to verify mode.
     console.info(
-      `%cOpen Satchel: browser mode (zenlink/dev testing) — file ops go to <input type="file"> + downloads; recent files in localStorage.`,
+      `%cOpen Satchel: browser mode (zenlink/dev testing) - file ops go to <input type="file"> + downloads; recent files in localStorage.`,
       'color:#3b82f6',
     )
   }

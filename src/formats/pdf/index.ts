@@ -371,7 +371,7 @@ function recordOcrEditDegradations(
     detail:
       `paragraph ${edit.paragraphId} on page ${pageIndex + 1}: OCR-recognized text saved as a ` +
       'drawn overlay (no extractable source text to rewrite in place)' +
-      (engineReason ? ` — engine: ${engineReason}` : ''),
+      (engineReason ? ` - engine: ${engineReason}` : ''),
     pageIndex,
     paragraphId: edit.paragraphId,
   })
@@ -383,7 +383,7 @@ function recordOcrEditDegradations(
     area: 'ocr.style_forced',
     detail:
       `paragraph ${edit.paragraphId} on page ${pageIndex + 1}: drawn in ${family} ${weight} ` +
-      `${slant} ${color} — the scanned glyphs' real font, weight, and color are approximated`,
+      `${slant} ${color} - the scanned glyphs' real font, weight, and color are approximated`,
     pageIndex,
     paragraphId: edit.paragraphId,
   })
@@ -459,7 +459,7 @@ export const pdfHandler: FormatHandler = {
     // refusal is the deliberate conservative choice.
     if (pageCount === 0) {
       let reason =
-        'This PDF has no pages that can be displayed — it may be empty or damaged.'
+        'This PDF has no pages that can be displayed - it may be empty or damaged.'
       if (isTauri && _filePath) {
         try {
           const { invoke } = await import('@tauri-apps/api/core')
@@ -471,11 +471,11 @@ export const pdfHandler: FormatHandler = {
             reason =
               'This PDF appears damaged or uses an unsupported structure: its page tree could ' +
               'not be read (the catalog references pages, but those objects are unreachable). ' +
-              'Open Satchel will not try to recover it automatically — recovering a signed or ' +
+              'Open Satchel will not try to recover it automatically - recovering a signed or ' +
               'revised file this way can expose content that was meant to be removed.'
           } else if (!health.parse_ok) {
             reason =
-              'This PDF could not be parsed and cannot be safely opened — the file is likely corrupt.'
+              'This PDF could not be parsed and cannot be safely opened - the file is likely corrupt.'
           }
         } catch {
           // Health probe unavailable (browser mode, IPC error) — keep the
@@ -1363,7 +1363,7 @@ export const pdfHandler: FormatHandler = {
                   detail:
                     `paragraph ${e.paragraphId} on page ${pageIndex + 1}: deleted text was ` +
                     'removed from the current revision, but the incremental save keeps the ' +
-                    'prior revision in the file — use Redact to remove it permanently',
+                    'prior revision in the file - use Redact to remove it permanently',
                   pageIndex,
                   paragraphId: e.paragraphId,
                 })
@@ -1467,7 +1467,7 @@ export const pdfHandler: FormatHandler = {
           area: 'redact.unclassified_opaque_rect',
           detail:
             `page ${page.pageIndex + 1}: an opaque black ${w}×${h} px rectangle was saved as a ` +
-            'drawn shape, not a redaction — content underneath remains in the file',
+            'drawn shape, not a redaction - content underneath remains in the file',
           pageIndex: page.pageIndex,
         })
       }
@@ -1539,7 +1539,7 @@ export const pdfHandler: FormatHandler = {
       if (rotationConflict !== undefined) {
         throw new Error(
           `Save refused: page ${rotationConflict.page + 1} has both a pending rotation and ` +
-            'redaction marks in the same save — the redaction would be burned at the wrong ' +
+            'redaction marks in the same save - the redaction would be burned at the wrong ' +
             'position. Save the rotation first, then mark and save the redaction.',
         )
       }
@@ -1718,7 +1718,7 @@ export const pdfHandler: FormatHandler = {
                 detail:
                   `tagged structure rebuilt as generic paragraphs on save: ${describeFlattenedRoles(flattened)} ` +
                   'collapsed to /P (edits that touch a semantic element still collapse it; full ' +
-                  'per-element MCID rewrite deferred — see KNOWN-LIMITATIONS §8a)',
+                  'per-element MCID rewrite deferred - see KNOWN-LIMITATIONS §8a)',
               })
             }
           } catch {
@@ -1845,7 +1845,7 @@ export const pdfHandler: FormatHandler = {
         )
         if (finalVerdict.failures.length > 0) {
           throw new Error(
-            'Redaction verification failed before encryption — redacted content would ' +
+            'Redaction verification failed before encryption - redacted content would ' +
               'survive in the encrypted file, so the save was refused. ' +
               finalVerdict.failures.join('; '),
           )

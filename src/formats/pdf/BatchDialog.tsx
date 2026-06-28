@@ -122,7 +122,7 @@ export default function BatchDialog({ mode, onClose }: Props) {
         else if (target === 'imgonly') await download(`${base}-image-only.pdf`, await toImageOnlyPdf(bytes), 'application/pdf')
       } catch (e) { setStatus(`Failed on ${files[i].name}: ${(e as Error).message}`) }
     }
-    const loStatus = lo.available ? `LibreOffice detected${lo.version ? ` (${lo.version.split('\n')[0]})` : ''}.` : 'LibreOffice not installed — used built-in converter.'
+    const loStatus = lo.available ? `LibreOffice detected${lo.version ? ` (${lo.version.split('\n')[0]})` : ''}.` : 'LibreOffice not installed - used built-in converter.'
     setStatus(`Converted ${files.length} file(s) → ${target}${engineNote}. ${loStatus}`)
     setBusy(false)
   }

@@ -61,7 +61,7 @@ export default function WatchedFoldersDialog({ onClose }: Props) {
 
         {!isTauri && (
           <div style={{ fontSize: 12, padding: 10, background: 'var(--bg-surface)', borderLeft: '3px solid #f9e2af', marginBottom: 12 }}>
-            Hot-folder watch requires the Tauri desktop build — browsers don't expose OS file-system watchers. Run <code>npm run tauri:dev</code>.
+            Hot-folder watch requires the Tauri desktop build - browsers don't expose OS file-system watchers. Run <code>npm run tauri:dev</code>.
           </div>
         )}
 
@@ -82,7 +82,7 @@ export default function WatchedFoldersDialog({ onClose }: Props) {
                     📁 {w.path}
                   </div>
                   <div style={{ fontSize: 10, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={w.actionJsonPath ?? 'No action assigned'}>
-                    Action: {w.actionJsonPath ? w.actionJsonPath.split(/[/\\]/).pop() : '(none — will prompt per file)'}
+                    Action: {w.actionJsonPath ? w.actionJsonPath.split(/[/\\]/).pop() : '(none - will prompt per file)'}
                   </div>
                 </div>
                 <button data-testid={`wf-stop-${w.id}`} onClick={() => handleRemove(w.id)} disabled={busy}

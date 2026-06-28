@@ -496,7 +496,7 @@ export async function serializeEditsToPdf(
       for (const [fieldName, value] of Object.entries(pageState.formValues)) {
         const field = form.getFields().find((f) => f.getName() === fieldName)
         if (!field) {
-          console.warn(`[editSerializer] form field "${fieldName}" not found — skipping`)
+          console.warn(`[editSerializer] form field "${fieldName}" not found - skipping`)
           options?.collector?.record({
             area: 'serializer.form_value_dropped',
             detail: `form field "${fieldName}" not found in document; the entered value was dropped`,
@@ -553,7 +553,7 @@ export async function serializeEditsToPdf(
               if (max && text.length > max) {
                 console.warn(
                   `[editSerializer] form field "${fieldName}" text length ` +
-                    `${text.length} exceeds declared MaxLen ${max} — Acrobat will truncate on display.`,
+                    `${text.length} exceeds declared MaxLen ${max} - Acrobat will truncate on display.`,
                 )
                 options?.collector?.record({
                   area: 'serializer.form_value_truncated',
@@ -564,7 +564,7 @@ export async function serializeEditsToPdf(
               if (stored !== text) {
                 console.warn(
                   `[editSerializer] form field "${fieldName}" stored != input ` +
-                    `(stored.length=${stored?.length}, input.length=${text.length}) — pd-lib may have truncated.`,
+                    `(stored.length=${stored?.length}, input.length=${text.length}) - pd-lib may have truncated.`,
                 )
                 options?.collector?.record({
                   area: 'serializer.form_value_truncated',

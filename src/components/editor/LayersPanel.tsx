@@ -79,7 +79,7 @@ export default function LayersPanel({ fabricCanvas, onChange }: Props) {
             color: isActive ? 'var(--bg-primary)' : 'var(--text-primary)',
             borderRadius: 2, cursor: 'pointer'
           }} onClick={() => handleSelect(obj)}>
-            <button onClick={(e) => { e.stopPropagation(); toggleVisibility(obj) }} title="Toggle visibility" style={{ background:'transparent', border:'none', cursor:'pointer', padding:0, color:'inherit' }}>{obj.visible !== false ? '👁' : '—'}</button>
+            <button onClick={(e) => { e.stopPropagation(); toggleVisibility(obj) }} title="Toggle visibility" style={{ background:'transparent', border:'none', cursor:'pointer', padding:0, color:'inherit' }}>{obj.visible !== false ? '👁' : '-'}</button>
             <button onClick={(e) => { e.stopPropagation(); toggleLock(obj) }} title="Toggle lock" style={{ background:'transparent', border:'none', cursor:'pointer', padding:0, color:'inherit' }}>{obj.lockMovementX ? '🔒' : '🔓'}</button>
             <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label(obj)}</span>
             <button onClick={(e) => { e.stopPropagation(); moveTop(obj) }} title="To front" style={{ background:'transparent', border:'none', cursor:'pointer', padding:0, color:'inherit' }}>⇈</button>

@@ -56,7 +56,7 @@ const EN: Record<string, string> = {
   // Empty state
   'empty.tagline': 'A universal file editor that lives on your machine, not in the cloud.',
   'empty.drop-cta': 'Drop a PDF, or click to open',
-  'empty.drop-sub': 'pdf — full editor · other formats coming in M5 / M6',
+  'empty.drop-sub': 'pdf - full editor · other formats coming in M5 / M6',
   'empty.recent-header': 'Recent',
   'empty.pinned-header': 'Pinned',
   'empty.folders-header': 'Folders',
@@ -74,7 +74,7 @@ const EN: Record<string, string> = {
   'empty.ethos.no-cloud': 'No cloud sync',
   'empty.ethos.no-cloud-body': 'Your files never leave your machine.',
   'empty.ethos.no-ai': 'No AI calls',
-  'empty.ethos.no-ai-body': 'Local-first — no API dependencies.',
+  'empty.ethos.no-ai-body': 'Local-first - no API dependencies.',
 
   // Common buttons
   'common.cancel': 'Cancel',

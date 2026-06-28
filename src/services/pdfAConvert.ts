@@ -519,7 +519,7 @@ async function embedMissingFonts(
         // would be substituted but its content never re-encoded — garbage
         // GIDs + no /ToUnicode. Don't substitute those; record honestly.
         if (!allowCidSubstitution) {
-          unfixed.push(`${baseFont} (bare CID font inside a form XObject — CJK substitution is page-level only this session)`)
+          unfixed.push(`${baseFont} (bare CID font inside a form XObject - CJK substitution is page-level only this session)`)
           continue
         }
         const toUnicodeBytes = readToUnicodeBytes(font)

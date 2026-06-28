@@ -78,7 +78,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
         const { name, patterns } = loadPatternBundle(text)
         setBundlePatterns(patterns)
         setBundleName(name)
-        setStatus(`Loaded bundle "${name}" — ${patterns.length} pattern${patterns.length === 1 ? '' : 's'}.`)
+        setStatus(`Loaded bundle "${name}" - ${patterns.length} pattern${patterns.length === 1 ? '' : 's'}.`)
       } catch (e) {
         setStatus(e instanceof Error ? `Bundle load failed: ${e.message}` : 'Bundle load failed')
       }
@@ -305,7 +305,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
 
         <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
           Pick patterns to scan for. Apply burns opaque rectangles over every
-          match — same forensic guarantee as the manual redaction tool (no
+          match - same forensic guarantee as the manual redaction tool (no
           recoverable text in the output).
         </div>
 
@@ -514,7 +514,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
           >
             <strong style={{ color: 'var(--accent)' }}>Recommended for legally-binding redaction:</strong>{' '}
             enable <em>Legal Guarantee</em> below. It makes redaction permanent and
-            irrecoverable by construction — the standard for releasing documents to
+            irrecoverable by construction - the standard for releasing documents to
             courts, regulators, or the public.
           </div>
         )}
@@ -538,12 +538,12 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
             checked={legalGuarantee}
             onChange={(e) => onToggleLegalGuarantee(e.target.checked)}
           />
-          Legal Guarantee — permanent, irrecoverable redaction (flattens pages, autosave off)
+          Legal Guarantee - permanent, irrecoverable redaction (flattens pages, autosave off)
         </label>
 
         <label
           data-testid="search-redact-wipe-metadata"
-          title="Also remove the document's metadata — title, author, creator, producer, creation/modification dates, and the XMP packet — on save. Applies to every save while checked."
+          title="Also remove the document's metadata - title, author, creator, producer, creation/modification dates, and the XMP packet - on save. Applies to every save while checked."
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -636,7 +636,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 18 }}>🔒</span>
             <h3 style={{ margin: 0, fontSize: 16, color: 'var(--text-primary)' }}>
-              Enable Legal Guarantee — {lgWalkthrough === 1 ? 'How it works' : 'What happens when you save'}
+              Enable Legal Guarantee - {lgWalkthrough === 1 ? 'How it works' : 'What happens when you save'}
             </h3>
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
@@ -648,7 +648,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
             <div style={{ fontSize: 13, color: 'var(--text-primary)', lineHeight: 1.6 }}>
               <p style={{ marginTop: 0 }}>
                 Legal Guarantee makes redaction <strong>permanent and irrecoverable by
-                construction</strong> — the standard required for government, legal, and
+                construction</strong> - the standard required for government, legal, and
                 regulated releases.
               </p>
               <ul style={{ margin: 0, paddingLeft: 18 }}>
@@ -658,7 +658,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
                   Continue with caution.
                 </li>
                 <li>
-                  <strong>Undo / redo keep working normally</strong> while you edit — right
+                  <strong>Undo / redo keep working normally</strong> while you edit - right
                   up until your next manual save.
                 </li>
               </ul>
@@ -668,7 +668,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
               <p style={{ marginTop: 0 }}>When you save with Legal Guarantee on:</p>
               <ul style={{ margin: 0, paddingLeft: 18 }}>
                 <li>Each redacted page is <strong>flattened to a secured image</strong>.</li>
-                <li>The content under your marks is <strong>destroyed at the pixel level</strong> — it cannot be recovered by any viewer or tool.</li>
+                <li>The content under your marks is <strong>destroyed at the pixel level</strong> - it cannot be recovered by any viewer or tool.</li>
                 <li>Those pages <strong>lose selectable text</strong> (they become images).</li>
                 <li>The undo history is <strong>cleared</strong>, and <strong>the save cannot be undone</strong>.</li>
               </ul>
@@ -709,7 +709,7 @@ export default function SearchAndRedactDialog({ tabId, onClose }: Props) {
                 onClick={confirmLegalGuarantee}
                 style={{ padding: '6px 14px', fontSize: 12, borderRadius: 4, background: 'var(--accent)', color: 'var(--bg-primary)', border: 'none', fontWeight: 600, cursor: 'pointer' }}
               >
-                I understand — enable
+                I understand - enable
               </button>
             )}
           </div>

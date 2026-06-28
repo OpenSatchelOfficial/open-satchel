@@ -256,7 +256,7 @@ export async function checkAccessibility(bytes: Uint8Array): Promise<A11yResult>
   if (hasJs) {
     issues.push({
       severity: 'warning', code: 'A11Y-12',
-      message: 'Document contains auto-actions (OpenAction or AA) — interferes with assistive tech',
+      message: 'Document contains auto-actions (OpenAction or AA) - interferes with assistive tech',
       remediation: 'Run Sanitize to strip actions',
     })
   }

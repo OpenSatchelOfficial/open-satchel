@@ -119,7 +119,7 @@ export default function ToolRail({ onOpenLauncher }: ToolRailProps) {
           tool. ⌘K hint is part of the affordance. */}
       <button
         onClick={onOpenLauncher}
-        title="More tools — Action Wizard, Merge, OCR, Compare, Watermark…  (Ctrl+K)"
+        title="More tools - Action Wizard, Merge, OCR, Compare, Watermark…  (Ctrl+K)"
         style={{
           width: 36,
           height: 36,

@@ -105,7 +105,7 @@ export default function OcrDialog({ tabId, onClose }: Props) {
         border: '1px solid var(--border)', minWidth: 460, maxWidth: 540
       }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-          <h3 style={{ margin: 0, fontSize: 16 }}>OCR — Text Recognition</h3>
+          <h3 style={{ margin: 0, fontSize: 16 }}>OCR - Text Recognition</h3>
           <button onClick={onClose} style={{ fontSize: 18, background: 'transparent', border: 'none', color: 'var(--text-primary)', cursor: 'pointer' }}>
             &#x2715;
           </button>
@@ -209,7 +209,7 @@ export default function OcrDialog({ tabId, onClose }: Props) {
                 }} />
               </div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                {progress}% — {statusText}
+                {progress}% - {statusText}
               </div>
             </div>
           )}
@@ -297,7 +297,7 @@ function OcrSuspectsReview({ suspects, rasterizedPages, onClose }: SuspectsRevie
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1001 }}>
       <div style={{ background: 'var(--bg-primary)', padding: 20, borderRadius: 8, border: '1px solid var(--border)', minWidth: 520, maxWidth: 640 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-          <h3 style={{ margin: 0, fontSize: 15 }}>OCR Suspects — {idx + 1}/{suspects.length}</h3>
+          <h3 style={{ margin: 0, fontSize: 15 }}>OCR Suspects - {idx + 1}/{suspects.length}</h3>
           <button onClick={onClose} style={{ fontSize: 18, background: 'transparent', border: 'none', color: 'var(--text-primary)', cursor: 'pointer' }}>✕</button>
         </div>
 

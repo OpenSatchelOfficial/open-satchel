@@ -75,36 +75,36 @@ function buildCommands(setTool: (t: Tool) => void): Cmd[] {
     // These open the existing format-specific dialogs once wiring lands.
     // Until then they show a friendly "coming soon" so the launcher
     // surface is always honest about what's bound.
-    { group: 'Pages',  label: 'Page Manager',      kind: 'action', action: () => 'Page Manager — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Merge PDFs',        kind: 'action', action: () => 'Merge — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Split PDF',         kind: 'action', action: () => 'Split — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Page numbers',      kind: 'action', action: () => 'Page Numbers — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Bates numbering',   kind: 'action', action: () => 'Bates — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Crop pages',        kind: 'action', action: () => 'Crop — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Page size',         kind: 'action', action: () => 'Page Size — open via the Pages ribbon' },
-    { group: 'Pages',  label: 'Page labels',       kind: 'action', action: () => 'Page Labels — open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Page Manager',      kind: 'action', action: () => 'Page Manager - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Merge PDFs',        kind: 'action', action: () => 'Merge - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Split PDF',         kind: 'action', action: () => 'Split - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Page numbers',      kind: 'action', action: () => 'Page Numbers - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Bates numbering',   kind: 'action', action: () => 'Bates - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Crop pages',        kind: 'action', action: () => 'Crop - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Page size',         kind: 'action', action: () => 'Page Size - open via the Pages ribbon' },
+    { group: 'Pages',  label: 'Page labels',       kind: 'action', action: () => 'Page Labels - open via the Pages ribbon' },
 
-    { group: 'Tools',  label: 'Properties / Metadata', kind: 'action', action: () => 'Metadata — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Initial view…',     kind: 'action', action: () => 'Initial View — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Audit size',        kind: 'action', action: () => 'Audit Size — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Layers (OCG)',      kind: 'action', action: () => 'Layers — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'OCR — recognize text', kind: 'action', keywords: 'ocr recognize text', action: () => 'OCR — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Extract text',      kind: 'action', action: () => 'Extract Text — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Extract images',    kind: 'action', action: () => 'Extract Images — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Replace image',     kind: 'action', action: () => 'Replace Image — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Form Designer',     kind: 'action', action: () => 'Form Designer — open via the Tools ribbon' },
-    { group: 'Tools',  label: 'Auto-detect fields',kind: 'action', action: () => 'Auto-detect — open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Properties / Metadata', kind: 'action', action: () => 'Metadata - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Initial view…',     kind: 'action', action: () => 'Initial View - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Audit size',        kind: 'action', action: () => 'Audit Size - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Layers (OCG)',      kind: 'action', action: () => 'Layers - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'OCR - recognize text', kind: 'action', keywords: 'ocr recognize text', action: () => 'OCR - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Extract text',      kind: 'action', action: () => 'Extract Text - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Extract images',    kind: 'action', action: () => 'Extract Images - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Replace image',     kind: 'action', action: () => 'Replace Image - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Form Designer',     kind: 'action', action: () => 'Form Designer - open via the Tools ribbon' },
+    { group: 'Tools',  label: 'Auto-detect fields',kind: 'action', action: () => 'Auto-detect - open via the Tools ribbon' },
 
-    { group: 'Protect',label: 'Add watermark',     kind: 'action', keywords: 'watermark wmrk', action: () => 'Watermark — open via the Protect ribbon' },
-    { group: 'Protect',label: 'Password protect',  kind: 'action', action: () => 'Password — open via the Protect ribbon' },
-    { group: 'Protect',label: 'Sign & certify',    kind: 'action', action: () => 'Sign & Certify — open via the Fill & Sign ribbon' },
-    { group: 'Protect',label: 'Verify signatures', kind: 'action', action: () => 'Verify — open via the Protect ribbon' },
+    { group: 'Protect',label: 'Add watermark',     kind: 'action', keywords: 'watermark wmrk', action: () => 'Watermark - open via the Protect ribbon' },
+    { group: 'Protect',label: 'Password protect',  kind: 'action', action: () => 'Password - open via the Protect ribbon' },
+    { group: 'Protect',label: 'Sign & certify',    kind: 'action', action: () => 'Sign & Certify - open via the Fill & Sign ribbon' },
+    { group: 'Protect',label: 'Verify signatures', kind: 'action', action: () => 'Verify - open via the Protect ribbon' },
 
-    { group: 'Batch',  label: 'PDF → Word',        kind: 'action', action: () => 'PDF → Word — open via the Batch ribbon' },
-    { group: 'Batch',  label: 'PDF → PowerPoint',  kind: 'action', action: () => 'PDF → PPT — open via the Batch ribbon' },
-    { group: 'Batch',  label: 'PDF → Excel',       kind: 'action', action: () => 'PDF → Excel — open via the Batch ribbon' },
-    { group: 'Batch',  label: 'Action Wizard',     kind: 'action', action: () => 'Action Wizard — open via the Batch ribbon' },
-    { group: 'Batch',  label: 'Watched folders',   kind: 'action', action: () => 'Watched Folders — open via the Batch ribbon' },
+    { group: 'Batch',  label: 'PDF → Word',        kind: 'action', action: () => 'PDF → Word - open via the Batch ribbon' },
+    { group: 'Batch',  label: 'PDF → PowerPoint',  kind: 'action', action: () => 'PDF → PPT - open via the Batch ribbon' },
+    { group: 'Batch',  label: 'PDF → Excel',       kind: 'action', action: () => 'PDF → Excel - open via the Batch ribbon' },
+    { group: 'Batch',  label: 'Action Wizard',     kind: 'action', action: () => 'Action Wizard - open via the Batch ribbon' },
+    { group: 'Batch',  label: 'Watched folders',   kind: 'action', action: () => 'Watched Folders - open via the Batch ribbon' },
 
     { group: 'Settings', label: 'Open preferences…', kind: 'action', kbd: 'Ctrl+,', action: () => 'Click the gear icon in the toolbar' },
   ]
@@ -262,7 +262,7 @@ export default function CommandLauncher({ open, onClose }: CommandLauncherProps)
               setQuery(e.target.value)
               setCursor(0)
             }}
-            placeholder="Search every action — try ‘ocr’, ‘watermark’, ‘bates’"
+            placeholder="Search every action - try ‘ocr’, ‘watermark’, ‘bates’"
             style={{
               flex: 1,
               border: 'none',

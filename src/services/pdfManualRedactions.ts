@@ -264,7 +264,7 @@ function fabricRedactionObjectToRect(
   const angle = Math.abs(finiteNumber(obj.angle, 0)) % 360
   if (angle > 0.01 && angle < 359.99) {
     throw new Error(
-      `redaction mark is rotated (${finiteNumber(obj.angle, 0)}°) — rotated marks cannot be ` +
+      `redaction mark is rotated (${finiteNumber(obj.angle, 0)}°) - rotated marks cannot be ` +
         'mapped to an axis-aligned redaction region; redraw the mark without rotation',
     )
   }
@@ -278,7 +278,7 @@ function fabricRedactionObjectToRect(
   const height = Math.abs(rawH)
   if (width <= 0 || height <= 0) {
     throw new Error(
-      `redaction mark has a degenerate size (${width.toFixed(2)}×${height.toFixed(2)} px) — ` +
+      `redaction mark has a degenerate size (${width.toFixed(2)}×${height.toFixed(2)} px) - ` +
         'delete the mark and redraw it over the content to remove',
     )
   }
@@ -311,7 +311,7 @@ function fabricRedactionObjectToRect(
   if (redactionW <= 0.25 || redactionH <= 0.25) {
     throw new Error(
       `redaction mark maps outside the page bounds (page is ${pdfW.toFixed(0)}×${pdfH.toFixed(0)} pt, ` +
-        `mark at css ${minX.toFixed(0)},${minY.toFixed(0)} ${width.toFixed(0)}×${height.toFixed(0)} @zoom ${z}) — ` +
+        `mark at css ${minX.toFixed(0)},${minY.toFixed(0)} ${width.toFixed(0)}×${height.toFixed(0)} @zoom ${z}) - ` +
         'delete the mark and redraw it over the content to remove',
     )
   }

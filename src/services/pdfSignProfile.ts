@@ -98,7 +98,7 @@ export function classifySignProfile(bytes: Uint8Array): SignProfileReport {
   if (docTimestampCount > 0) notes.push(`${docTimestampCount} /DocTimeStamp dict${docTimestampCount === 1 ? '' : 's'}`)
   if (hasTsaSubFilter) notes.push('signature carries /SubFilter ETSI.RFC3161 (TSA)')
   if (hasDss) notes.push('/DSS document security store present (LTV)')
-  if (hasArchiveTimestamp) notes.push('archive timestamp covers /DSS — long-term archive ready')
+  if (hasArchiveTimestamp) notes.push('archive timestamp covers /DSS - long-term archive ready')
 
   return {
     profile,

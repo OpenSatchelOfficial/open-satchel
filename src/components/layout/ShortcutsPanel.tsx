@@ -247,7 +247,7 @@ export default function ShortcutsPanel({ onClose }: Props) {
                   {isRebinding
                     ? 'Press a key…'
                     : e.effectiveBinding.key === ''
-                    ? '— unbound'
+                    ? '- unbound'
                     : formatBinding(e.effectiveBinding)}
                 </button>
                 <button

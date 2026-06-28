@@ -20,7 +20,7 @@ const TOUR_KEY = 'open-satchel:onboarding-tour-completed'
 const STEPS: Step[] = [
   {
     title: 'Welcome to Open Satchel',
-    body: 'Quick tour — 5 steps, ~30 seconds. You can skip anytime; the tour won\'t auto-replay.',
+    body: 'Quick tour - 5 steps, ~30 seconds. You can skip anytime; the tour won\'t auto-replay.',
   },
   {
     title: 'Open a PDF to get started',
@@ -30,16 +30,16 @@ const STEPS: Step[] = [
   },
   {
     title: 'Edit text directly on the page',
-    body: 'Click any paragraph in the open PDF to edit it inline — Acrobat-style. The mini-toolbar that pops up has alignment, font size, font family, line spacing, and color.',
+    body: 'Click any paragraph in the open PDF to edit it inline - Acrobat-style. The mini-toolbar that pops up has alignment, font size, font family, line spacing, and color.',
   },
   {
     title: 'Customize keyboard shortcuts',
-    body: 'Open Preferences (top-right gear) → Customize… to remap any global shortcut. Save, Find, Replace, Command Palette — all rebindable.',
+    body: 'Open Preferences (top-right gear) → Customize… to remap any global shortcut. Save, Find, Replace, Command Palette - all rebindable.',
     target: '[data-testid="prefs-open-shortcuts"]',
   },
   {
     title: 'Local-first, no cloud',
-    body: 'Everything stays on your machine. No account. No telemetry. AGPL source. Audit the binary yourself — see docs/AIRGAP-AUDIT.md and the SBOM.',
+    body: 'Everything stays on your machine. No account. No telemetry. AGPL source. Audit the binary yourself - see docs/AIRGAP-AUDIT.md and the SBOM.',
   },
 ]
 

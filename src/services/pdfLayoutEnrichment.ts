@@ -260,7 +260,7 @@ export async function enrichAndRouteParagraphEdits(
           detail:
             `layout metadata missing for paragraph ${edit.paragraphId} on page ${pageIndex}` +
             (paras
-              ? ' (paragraph not found in the save-time cluster pass — moved/synthesized edit?)'
+              ? ' (paragraph not found in the save-time cluster pass - moved/synthesized edit?)'
               : ' (page analysis unavailable)') +
             '; detected alignment and font-recovery state are UNKNOWN for this edit',
           pageIndex,
@@ -280,7 +280,7 @@ export async function enrichAndRouteParagraphEdits(
         collector.record({
           area: 'layout.detected_alignment_routed',
           detail:
-            `paragraph ${edit.paragraphId}: detected align='${action.align}' — text edit ` +
+            `paragraph ${edit.paragraphId}: detected align='${action.align}' - text edit ` +
             'routed to the align-aware overlay so the alignment is preserved',
           pageIndex,
           paragraphId: edit.paragraphId,

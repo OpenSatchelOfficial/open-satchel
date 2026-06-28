@@ -58,7 +58,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
   const [certifyLevel, setCertifyLevel] = useState<'none' | '1' | '2' | '3'>('none')
   const [tsaUrl, setTsaUrl] = useState('')
   const TSA_PRESETS: Array<{ name: string; url: string }> = [
-    { name: '— No timestamp', url: '' },
+    { name: '- No timestamp', url: '' },
     { name: 'FreeTSA', url: 'https://freetsa.org/tsr' },
     { name: 'DigiCert', url: 'http://timestamp.digicert.com' },
     { name: 'Sectigo', url: 'http://timestamp.sectigo.com' },
@@ -133,7 +133,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
       const buf = await f.arrayBuffer()
       setPendingP12({ bytes: new Uint8Array(buf), filename: f.name })
       setP12Passphrase('')
-      setStatus(`Loaded "${f.name}" — enter the PKCS#12 passphrase to activate.`)
+      setStatus(`Loaded "${f.name}" - enter the PKCS#12 passphrase to activate.`)
     }
     input.click()
   }
@@ -419,10 +419,10 @@ export default function SignDialog({ tabId, onClose }: Props) {
                 <select data-testid="sign-certify" style={inp}
                   value={certifyLevel}
                   onChange={(e) => setCertifyLevel(e.target.value as typeof certifyLevel)}>
-                  <option value="none">— None (approval signature)</option>
-                  <option value="1">Level 1 — No changes allowed</option>
-                  <option value="2">Level 2 — Form fill + signatures allowed</option>
-                  <option value="3">Level 3 — Form fill + sigs + annotations allowed</option>
+                  <option value="none">- None (approval signature)</option>
+                  <option value="1">Level 1 - No changes allowed</option>
+                  <option value="2">Level 2 - Form fill + signatures allowed</option>
+                  <option value="3">Level 3 - Form fill + sigs + annotations allowed</option>
                 </select>
               </Field>
 
@@ -484,7 +484,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
                 </div>
               </div>
 
-              <Field label="TSA (RFC 3161 timestamp — Tauri desktop build; browser preview CORS-blocks public TSAs)">
+              <Field label="TSA (RFC 3161 timestamp - Tauri desktop build; browser preview CORS-blocks public TSAs)">
                 <select data-testid="sign-tsa" style={inp}
                   value={tsaUrl}
                   onChange={(e) => setTsaUrl(e.target.value)}>
@@ -502,7 +502,7 @@ export default function SignDialog({ tabId, onClose }: Props) {
                   onChange={(e) => setLtv(e.target.checked)}
                 />
                 <span>
-                  Enable LTV (Long-Term Validation) — embed OCSP + full chain in /DSS.
+                  Enable LTV (Long-Term Validation) - embed OCSP + full chain in /DSS.
                   Requires CA-issued cert; zga silently skips for self-signed.
                   Tauri-only (OCSP fetches go through the Rust proxy).
                 </span>
@@ -593,9 +593,9 @@ export default function SignDialog({ tabId, onClose }: Props) {
                       : typeof navigator !== 'undefined' && /mac/i.test(navigator.userAgent) ? 'darwin'
                       : 'linux'
                     ] ?? []).flatMap(g => g.paths.map(p => (
-                      <option key={g.label + p} value={p}>{g.label} — {p}</option>
+                      <option key={g.label + p} value={p}>{g.label} - {p}</option>
                     )))}
-                    <option value="">— Custom path…</option>
+                    <option value="">- Custom path…</option>
                   </select>
                 </div>
                 {hwModulePath === '' && (
@@ -618,12 +618,12 @@ export default function SignDialog({ tabId, onClose }: Props) {
                   <select data-testid="hw-slot" style={inp}
                     value={hwSlotId ?? ''}
                     onChange={(e) => { setHwSlotId(Number(e.target.value)); setHwCerts(null) }}>
-                    <option value="">— Select slot —</option>
+                    <option value="">- Select slot -</option>
                     {hwSlots.map(s => (
                       <option key={s.slotId} value={s.slotId}
                         disabled={!s.tokenPresent}>
-                        Slot {s.slotId} — {s.tokenLabel ?? '(no token)'}
-                        {s.tokenSerial ? ` — serial ${s.tokenSerial.trim()}` : ''}
+                        Slot {s.slotId} - {s.tokenLabel ?? '(no token)'}
+                        {s.tokenSerial ? ` - serial ${s.tokenSerial.trim()}` : ''}
                       </option>
                     ))}
                   </select>

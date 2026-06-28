@@ -179,7 +179,7 @@ export default function CropImageDialog({ tabId, pageIndex, xObjectName, onClose
          onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div style={{ background: 'var(--bg-primary)', borderRadius: 8, padding: 20, border: '1px solid var(--border)', maxWidth: 720 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 10 }}>
-          <h3 style={{ margin: 0, fontSize: 15 }}>Crop image — {xObjectName}</h3>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Crop image - {xObjectName}</h3>
           <button onClick={onClose} style={{ fontSize: 18, background: 'transparent', border: 'none', color: 'var(--text-primary)', cursor: 'pointer' }}>✕</button>
         </div>
         {imgUrl && imgSize && crop ? (
@@ -227,7 +227,7 @@ export default function CropImageDialog({ tabId, pageIndex, xObjectName, onClose
               </div>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-              Crop: {Math.round(crop.x)}, {Math.round(crop.y)} — {Math.round(crop.w)}×{Math.round(crop.h)}px
+              Crop: {Math.round(crop.x)}, {Math.round(crop.y)} - {Math.round(crop.w)}×{Math.round(crop.h)}px
               <span style={{ marginLeft: 10 }}>Source: {imgSize.w}×{imgSize.h}px</span>
             </div>
           </>

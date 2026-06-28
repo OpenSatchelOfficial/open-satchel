@@ -72,7 +72,7 @@ export default function SpellCheckDialog({ tabId, onClose }: Props) {
 
         <p style={{ margin: '0 0 10px 0', fontSize: 10, color: 'var(--text-secondary)' }}>
           Heuristic scan of overlay text (Add Text boxes, sticky notes, watermarks).
-          Dictionary-free — flags suspicious bigrams + consonant runs. False positives expected.
+          Dictionary-free - flags suspicious bigrams + consonant runs. False positives expected.
         </p>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '4px 0' }}>

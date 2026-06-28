@@ -581,7 +581,7 @@ export default function EditableImageLayer({
                 boxSizing: 'border-box',
                 touchAction: 'none',
               }}
-              title={`Image: ${box.xObjectName}${box.rotated ? ' (rotated)' : ''}${!box.cmPresent ? ' — no cm, drag disabled' : ''}`}
+              title={`Image: ${box.xObjectName}${box.rotated ? ' (rotated)' : ''}${!box.cmPresent ? ' - no cm, drag disabled' : ''}`}
             />
             {activeId === box.id && !markRedactionMode && (
               <div

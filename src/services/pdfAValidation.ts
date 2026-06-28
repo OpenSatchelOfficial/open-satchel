@@ -180,7 +180,7 @@ export async function validatePdfA(
   if (!outputIntents) {
     issues.push({
       severity: 'error', code: 'PDFA-9',
-      message: 'No /OutputIntents (required — ICC profile must be embedded)',
+      message: 'No /OutputIntents (required - ICC profile must be embedded)',
       remediation: 'Use Convert to PDF/A to embed sRGB output intent'
     })
   } else {

@@ -60,7 +60,7 @@ export default function AnnotationGutter() {
         }}
       >
         No annotations on this page yet. Highlight, comment, or stamp to
-        start a thread — replies and resolves will land in this column.
+        start a thread - replies and resolves will land in this column.
       </div>
 
       <button

@@ -470,12 +470,12 @@ export function humanizeDegradation(d: SaveDegradation): string {
       return 'New text boxes were drawn as overlay content (no original text to rewrite).'
     case 'strip.skipped_text_recoverable':
       return (
-        'SECURITY: the original text under an edited region could not be removed — ' +
+        'SECURITY: the original text under an edited region could not be removed - ' +
         'it remains recoverable in the saved file. ' + d.detail
       )
     case 'text.whiteout_unavailable':
       return (
-        'SECURITY: replacement masking was unavailable for some text edits — ' +
+        'SECURITY: replacement masking was unavailable for some text edits - ' +
         'original text may remain visible or recoverable. ' + d.detail
       )
     case 'font.substituted':
@@ -501,7 +501,7 @@ export function humanizeDegradation(d: SaveDegradation): string {
       return `Overlay re-draw approximates some original text properties (${d.detail}).`
     case 'ocr.overlay_only':
       return (
-        'OCR-recognized text was saved as a drawn overlay, not a true in-stream rewrite — ' +
+        'OCR-recognized text was saved as a drawn overlay, not a true in-stream rewrite - ' +
         'an image-only page has no extractable source text to modify in place. The edited ' +
         'text is searchable and copyable, but it is an overlay by nature: the original ' +
         `scanned page image is unchanged beneath it (${d.detail}).`
@@ -552,12 +552,12 @@ export function humanizeDegradation(d: SaveDegradation): string {
     case 'layout.alignment_unpreserved':
       return (
         'Edited text was redrawn left-anchored although the original paragraph is ' +
-        `center/right/justify aligned — the visual alignment is NOT preserved (${d.detail}).`
+        `center/right/justify aligned - the visual alignment is NOT preserved (${d.detail}).`
       )
     case 'layout.alignment_weak_evidence':
       return (
         'The original line looks visually centered, but its alignment could not be ' +
-        'confidently detected, so the edited text was redrawn left-anchored — a centered ' +
+        'confidently detected, so the edited text was redrawn left-anchored - a centered ' +
         `appearance may not be preserved (${d.detail}).`
       )
     case 'linked.overflow_dropped':
@@ -591,23 +591,23 @@ export function humanizeDegradation(d: SaveDegradation): string {
     case 'geometry.page_height_unavailable':
       return `Page geometry could not be read; edit coordinates may be misplaced (${d.detail}).`
     case 'redact.raster_fallback':
-      return `Redacted pages were rasterized (pixels burned — nothing recoverable, but the pages become images) (${d.detail}).`
+      return `Redacted pages were rasterized (pixels burned - nothing recoverable, but the pages become images) (${d.detail}).`
     case 'redact.glyph_procedure_rasterized':
-      return `A redacted page used a glyph drawn as a Type3 procedure, a Form XObject, or an image mask — invisible to the text/geometry redaction checks — so the page was flattened to a secured image to remove it permanently (the page loses selectable text) (${d.detail}).`
+      return `A redacted page used a glyph drawn as a Type3 procedure, a Form XObject, or an image mask - invisible to the text/geometry redaction checks - so the page was flattened to a secured image to remove it permanently (the page loses selectable text) (${d.detail}).`
     case 'redact.raster_dropped_doc_structure':
       return `Raster redaction rebuilt the document and dropped document-level structures (${d.detail}).`
     case 'redact.scan_streams_undecodable':
       return `Some compressed streams could not be opened by the byte-level scan; decoded-text and image-pixel verification still covered the redacted regions (${d.detail}).`
     case 'redact.image_undecodable_under_region':
-      return `SECURITY: an image overlapping a redacted region could not be verified at the pixel level, so the redaction was refused — the image may still contain the content. ${d.detail}`
+      return `SECURITY: an image overlapping a redacted region could not be verified at the pixel level, so the redaction was refused - the image may still contain the content. ${d.detail}`
     case 'redact.cid_scan_inconclusive':
-      return `SECURITY: the independent text-verification engine could not run, so a region using subset/CID fonts could not be confirmed clean — the redaction was refused rather than certified on an unverifiable region. ${d.detail}`
+      return `SECURITY: the independent text-verification engine could not run, so a region using subset/CID fonts could not be confirmed clean - the redaction was refused rather than certified on an unverifiable region. ${d.detail}`
     case 'redact.signature_invalidated':
-      return `SECURITY: this document was digitally signed; redacting it rewrites the whole file to remove the content permanently, which invalidates the signature — the saved copy is no longer signed. ${d.detail}`
+      return `SECURITY: this document was digitally signed; redacting it rewrites the whole file to remove the content permanently, which invalidates the signature - the saved copy is no longer signed. ${d.detail}`
     case 'signature.invalidated_by_edit':
       return `SECURITY: this document was digitally signed; your edit changes the signed content, so the saved file is no longer validly signed (a PDF viewer will flag it as modified). Re-sign it after editing if a signature is required. ${d.detail}`
     case 'redact.attachments_present':
-      return `SECURITY: this document has file attachments that redaction cannot scan — redacted content may exist inside them. ${d.detail}`
+      return `SECURITY: this document has file attachments that redaction cannot scan - redacted content may exist inside them. ${d.detail}`
     case 'redact.permanence_verified':
       return 'Redaction verified: byte-level, decoded-text, region, and annotation checks confirmed the redacted content is gone.'
     case 'redact.annotations_removed':
@@ -623,7 +623,7 @@ export function humanizeDegradation(d: SaveDegradation): string {
     case 'redact.structural_token_needle':
       return `Some redacted text matches PDF-internal vocabulary; the byte-level scan was skipped for it while decoded and region checks still ran (${d.detail}).`
     case 'redact.unclassified_opaque_rect':
-      return `An opaque black box was saved as a visual shape, NOT a redaction — content underneath remains in the file. Use the redaction tool to remove it permanently (${d.detail}).`
+      return `An opaque black box was saved as a visual shape, NOT a redaction - content underneath remains in the file. Use the redaction tool to remove it permanently (${d.detail}).`
     case 'delete.recoverable_prior_revision':
       return `Deleted text is gone from the visible document, but the file's prior revision still contains it (incremental save). Use Redact for permanent removal (${d.detail}).`
     case 'tag.restore_skipped_redaction':
@@ -637,13 +637,13 @@ export function humanizeDegradation(d: SaveDegradation): string {
     case 'metadata.wiped':
       return `Document metadata was wiped on save: the /Info dictionary (title, author, creator, producer, dates) and the XMP metadata packet were removed (${d.detail}).`
     case 'metadata.scrubbed_after_redaction':
-      return `Metadata scrubbed: along with the redaction, the document's identifying metadata — title, author, creator, producer, creation/modification dates, and the XMP packet — was removed from the saved file (${d.detail}).`
+      return `Metadata scrubbed: along with the redaction, the document's identifying metadata - title, author, creator, producer, creation/modification dates, and the XMP packet - was removed from the saved file (${d.detail}).`
     case 'metadata.wipe_failed':
-      return `Metadata wipe was requested but FAILED — identifying metadata may remain in the saved file (${d.detail}).`
+      return `Metadata wipe was requested but FAILED - identifying metadata may remain in the saved file (${d.detail}).`
     case 'redact.raster_dropped_page_interactivity':
-      return `Redacted page(s) were flattened to a secured image, which removes their interactive objects — links, form fields, and accessibility tags do not survive a flatten (${d.detail}).`
+      return `Redacted page(s) were flattened to a secured image, which removes their interactive objects - links, form fields, and accessibility tags do not survive a flatten (${d.detail}).`
     case 'redact.legal_guarantee_flatten':
-      return `Legal Guarantee: redacted page(s) were permanently flattened to a secured image — the content under the marks is destroyed at the pixel level and those pages no longer have selectable text (${d.detail}).`
+      return `Legal Guarantee: redacted page(s) were permanently flattened to a secured image - the content under the marks is destroyed at the pixel level and those pages no longer have selectable text (${d.detail}).`
     case 'redact.fill_witness_verified':
       return 'Redaction confirmed by an independent engine: pdfium rendered the saved file and the redacted region(s) are solid fill at the true content location.'
     case 'redact.fill_witness_skipped_rotated':

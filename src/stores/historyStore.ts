@@ -235,7 +235,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
       // stragglers at runtime.
       if (String((entry as { type?: string }).type ?? '').startsWith('ui:')) {
         console.warn(
-          `historyStore: dropped ${(entry as { type?: string }).type} entry — UI state is not undoable (document history only)`,
+          `historyStore: dropped ${(entry as { type?: string }).type} entry - UI state is not undoable (document history only)`,
         )
         return state
       }

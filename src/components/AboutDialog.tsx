@@ -305,7 +305,7 @@ export default function AboutDialog({ onClose }: Props) {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <DocLink doc="docs/AIRGAP-AUDIT.md" label="Air-gap audit (no telemetry, no cloud calls)" />
             <DocLink doc="docs/COMPLIANCE-CHECKLIST.md" label="Compliance checklist (HIPAA / FedRAMP / SOC 2)" />
-            <DocLink doc="docs/SBOM.md" label="SBOM — CycloneDX 1.5" />
+            <DocLink doc="docs/SBOM.md" label="SBOM - CycloneDX 1.5" />
             <DocLink doc="docs/REPRODUCIBLE-BUILD.md" label="Reproducible build recipe" />
           </div>
         </Section>
@@ -320,7 +320,7 @@ export default function AboutDialog({ onClose }: Props) {
             >
               github.com/OpenSatchelOfficial/open-satchel
             </a>
-            {' '}— AGPL source; the binary you run is the source you can audit.
+            {' '}- AGPL source; the binary you run is the source you can audit.
           </span>
         </Section>
 
@@ -355,7 +355,7 @@ function PublicView({
       <div style={{ fontSize: 11.5, color: 'var(--ink-2)', lineHeight: 1.5, marginBottom: 8 }}>
         You're using the <strong>Public Edition</strong> under AGPL-3.0. All
         features are available. Commercial licenses remove the AGPL
-        share-alike requirement —{' '}
+        share-alike requirement -{' '}
         <a
           href="https://opensatchel.dev/licensing"
           target="_blank"
@@ -493,7 +493,7 @@ function DocLink({ doc, label }: { doc: string; label: string }) {
       >
         {doc}
       </span>
-      <span style={{ color: 'var(--ink-2)' }}>—</span>
+      <span style={{ color: 'var(--ink-2)' }}>-</span>
       <span>{label}</span>
     </div>
   )
@@ -509,7 +509,7 @@ function maskLicenseId(id: string): string {
 }
 
 function formatExpiry(ts: number): string {
-  if (!ts || ts <= 0) return '—'
+  if (!ts || ts <= 0) return '-'
   return new Date(ts * 1000).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',

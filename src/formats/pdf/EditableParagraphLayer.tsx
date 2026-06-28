@@ -2282,7 +2282,7 @@ export default function EditableParagraphLayer({ tabId, pageIndex, pdfDoc, width
             <>
               <span data-testid="link-frame-count">
                 Chain: {linkingFrames.length} frame{linkingFrames.length === 1 ? '' : 's'}
-                {linkingFrames.length === 1 ? ' — click another paragraph to add' : ''}
+                {linkingFrames.length === 1 ? ' - click another paragraph to add' : ''}
               </span>
               <button
                 type="button"

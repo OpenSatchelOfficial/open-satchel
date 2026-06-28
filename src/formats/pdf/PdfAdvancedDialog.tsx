@@ -514,7 +514,7 @@ function SignSection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
           <strong>Existing signatures ({sigs.length})</strong>
           {sigs.map((s, i) => (
             <div key={i} style={{ marginTop: 4 }}>
-              {s.signerName ?? s.fieldName} · {s.reason ?? '—'} · {s.location ?? '—'} · {s.signedAt ?? '—'}
+              {s.signerName ?? s.fieldName} · {s.reason ?? '-'} · {s.location ?? '-'} · {s.signedAt ?? '-'}
             </div>
           ))}
         </div>
@@ -653,7 +653,7 @@ function ThumbnailSection({ state, tabId, onStatus }: { state: PdfFormatState; t
     // outlive a later content redaction (it's a separate image stream). Refuse
     // while marks are pending so we never bake an un-redacted page preview.
     if (stateHasManualRedactions(state)) {
-      onStatus('Apply or save your redactions before setting a thumbnail from a page — otherwise the embedded thumbnail would still show the un-redacted page.')
+      onStatus('Apply or save your redactions before setting a thumbnail from a page - otherwise the embedded thumbnail would still show the un-redacted page.')
       return
     }
     const bytes = await setPdfThumbnailFromPage(state.pdfBytes, sourcePage - 1, coverMode)
@@ -823,12 +823,12 @@ function FontsSection({
                     data-testid={`fonts-row-${i}`}
                     style={{ borderTop: '1px solid var(--border)' }}
                   >
-                    <td style={fontTd}>{f.family || '—'}</td>
+                    <td style={fontTd}>{f.family || '-'}</td>
                     <td style={{ ...fontTd, fontFamily: '"JetBrains Mono", monospace', fontSize: 10 }}>
                       {f.psName}
                     </td>
                     <td style={{ ...fontTd, textAlign: 'center', color: f.subsetted ? 'var(--accent)' : 'var(--text-muted)' }}>
-                      {f.subsetted ? '✂' : '—'}
+                      {f.subsetted ? '✂' : '-'}
                     </td>
                   </tr>
                 ))}
@@ -1064,24 +1064,24 @@ function SanitizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
   // means "report not loaded yet" — we still show the toggle so the
   // user can pre-set their selection while the scan completes.
   const formatCount = (n: number, label: string): string => {
-    if (n <= 0) return '— none found'
+    if (n <= 0) return '- none found'
     return `${n} ${label}${n === 1 ? '' : 's'}`
   }
   const counts: Record<string, string> = report
     ? {
         stripMetadata: report.metadata.present
-          ? `— ${[report.metadata.title && 'title', report.metadata.author && 'author', report.metadata.subject && 'subject', (report.metadata.keywords?.length ?? 0) > 0 && `${report.metadata.keywords?.length} keyword(s)`, report.metadata.creator && 'creator', report.metadata.producer && 'producer'].filter(Boolean).join(', ')}`
-          : '— none found',
-        stripXmp: report.xmp.present ? `— ${report.xmp.bytes} bytes` : '— none found',
+          ? `- ${[report.metadata.title && 'title', report.metadata.author && 'author', report.metadata.subject && 'subject', (report.metadata.keywords?.length ?? 0) > 0 && `${report.metadata.keywords?.length} keyword(s)`, report.metadata.creator && 'creator', report.metadata.producer && 'producer'].filter(Boolean).join(', ')}`
+          : '- none found',
+        stripXmp: report.xmp.present ? `- ${report.xmp.bytes} bytes` : '- none found',
         stripJavaScript: formatCount(report.javascript.count, 'action'),
         stripAttachments: report.attachments.count > 0
-          ? `— ${report.attachments.count} file(s): ${report.attachments.names.slice(0, 3).join(', ')}${report.attachments.names.length > 3 ? '…' : ''}`
-          : '— none found',
+          ? `- ${report.attachments.count} file(s): ${report.attachments.names.slice(0, 3).join(', ')}${report.attachments.names.length > 3 ? '…' : ''}`
+          : '- none found',
         stripHiddenLayers: formatCount(report.layers.count, 'layer'),
         stripAnnotations: formatCount(report.annotations.totalCount, 'annotation'),
         stripForms: report.forms.fieldCount > 0
-          ? `— ${report.forms.fieldCount} field(s)${report.forms.hasXfa ? ' + XFA' : ''}`
-          : '— none found',
+          ? `- ${report.forms.fieldCount} field(s)${report.forms.hasXfa ? ' + XFA' : ''}`
+          : '- none found',
       }
     : {}
 
@@ -1125,7 +1125,7 @@ function SanitizeSection({ state, tabId, onStatus }: { state: PdfFormatState; ta
       )}
       {items.map(it => {
         const count = counts[it.key] ?? ''
-        const isEmpty = count === '— none found'
+        const isEmpty = count === '- none found'
         return (
           <label
             key={it.key}
@@ -1215,13 +1215,13 @@ function WizardSection({ state, tabId, onStatus }: { state: PdfFormatState; tabI
       if (result.outputFormat === 'pdf') {
         useFormatStore.getState().updateFormatState<PdfFormatState>(tabId, (prev) => ({ ...prev, pdfBytes: result.outputBytes }))
         useTabStore.getState().setTabDirty(tabId, true)
-        onStatus('Workflow complete — PDF updated.')
+        onStatus('Workflow complete - PDF updated.')
       } else {
         await downloadBytes('output.' + result.outputFormat, result.outputBytes)
-        onStatus('Workflow complete — file downloaded.')
+        onStatus('Workflow complete - file downloaded.')
       }
     } else {
-      onStatus('Workflow failed — check log.')
+      onStatus('Workflow failed - check log.')
     }
     setRunning(false); setProgress('')
   }
@@ -1304,7 +1304,7 @@ function PdfASection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
     // /ActualText. Surface that to the user rather than silently producing
     // a non-compliant Unicode profile.
     if (profile === 'A-2U' || profile === 'A-3U') {
-      onStatus(`${profile} conversion not yet supported — use Validate to check existing compliance, or convert to ${profile.replace('U', 'B')} instead.`)
+      onStatus(`${profile} conversion not yet supported - use Validate to check existing compliance, or convert to ${profile.replace('U', 'B')} instead.`)
       return
     }
     setConverting(true)
@@ -1318,7 +1318,7 @@ function PdfASection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
       useTabStore.getState().setTabDirty(tabId, true)
       setConvertReport(report)
       setResult(null)
-      onStatus(`Converted to ${report.profile} — score ${report.finalScore}/100 (${report.isCompliant ? 'Compliant' : 'Non-compliant'})`)
+      onStatus(`Converted to ${report.profile} - score ${report.finalScore}/100 (${report.isCompliant ? 'Compliant' : 'Non-compliant'})`)
     } catch (e) {
       onStatus(`Convert failed: ${String(e)}`)
     } finally {
@@ -1386,7 +1386,7 @@ function PdfASection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
       {convertReport && (
         <div data-testid="pdfa-convert-report" style={{ marginBottom: 8, padding: 8, background: 'var(--bg-input, rgba(255,255,255,0.03))', border: '1px solid var(--border)', borderRadius: 4 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: convertReport.isCompliant ? 'var(--success)' : 'var(--danger)' }}>
-            Converted to {convertReport.profile} — Score: {convertReport.finalScore}/100 ({convertReport.isCompliant ? 'Compliant' : 'Non-compliant'})
+            Converted to {convertReport.profile} - Score: {convertReport.finalScore}/100 ({convertReport.isCompliant ? 'Compliant' : 'Non-compliant'})
           </div>
           <div style={{ fontSize: 11 }}>
             {convertReport.steps.map((s, i) => (
@@ -1416,7 +1416,7 @@ function PdfASection({ state, tabId, onStatus }: { state: PdfFormatState; tabId:
       {result && (
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: result.isCompliant ? 'var(--success)' : 'var(--danger)' }}>
-            {result.profile} — Score: {result.score}/100 ({result.isCompliant ? 'Compliant' : 'Non-compliant'})
+            {result.profile} - Score: {result.score}/100 ({result.isCompliant ? 'Compliant' : 'Non-compliant'})
           </div>
           {result.issues.map((issue, i) => (
             <div key={i} style={{ padding: '4px 0', borderBottom: '1px solid var(--border)', fontSize: 11 }}>
@@ -1568,7 +1568,7 @@ function AccessibilitySection({ state, tabId, onStatus }: { state: PdfFormatStat
       {checker && (
         <div style={{ marginBottom: 8, padding: 8, background: 'var(--bg-input, rgba(255,255,255,0.03))', border: '1px solid var(--border)', borderRadius: 4 }} data-testid="a11y-checker-report">
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6, color: checker.isCompliant ? 'var(--success)' : 'var(--danger)' }}>
-            {checker.profile} — Score: {checker.score}/100 ({checker.isCompliant ? 'Compliant' : 'Non-compliant'})
+            {checker.profile} - Score: {checker.score}/100 ({checker.isCompliant ? 'Compliant' : 'Non-compliant'})
           </div>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
             Tagged: {checker.stats.isTagged ? 'yes' : 'no'} | Figures: {checker.stats.figuresWithAlt}/{checker.stats.figureCount} have alt-text | Headings: {checker.stats.headingLevels.length > 0 ? checker.stats.headingLevels.map(h => `H${h}`).join(', ') : '(none)'}
@@ -1881,17 +1881,17 @@ function RedactVerifySection({ state, onStatus }: { state: PdfFormatState; onSta
     // if text content exists that might be hidden
 
     // Check 2: Metadata that might contain sensitive info
-    if (doc.getTitle()?.trim()) issues.push('Document title is set — may contain sensitive info')
+    if (doc.getTitle()?.trim()) issues.push('Document title is set - may contain sensitive info')
     if (doc.getAuthor()?.trim()) issues.push('Author field is set')
 
     // Check 3: XMP metadata
     if (doc.catalog.get(PDFName.of('Metadata'))) {
-      issues.push('XMP metadata stream present — may contain edit history')
+      issues.push('XMP metadata stream present - may contain edit history')
     }
 
     // Check 4: Embedded JavaScript
     if (doc.catalog.get(PDFName.of('OpenAction'))) {
-      issues.push('OpenAction present — could contain executable code')
+      issues.push('OpenAction present - could contain executable code')
     }
     const names = doc.catalog.get(PDFName.of('Names'))
     if (names) {
@@ -1913,23 +1913,23 @@ function RedactVerifySection({ state, onStatus }: { state: PdfFormatState; onSta
         if (arr?.size) annotCount += arr.size()
       }
     }
-    if (annotCount > 0) issues.push(`${annotCount} annotation(s) present — may contain comments or markup`)
+    if (annotCount > 0) issues.push(`${annotCount} annotation(s) present - may contain comments or markup`)
 
     // Check 6: Form fields
     if (doc.catalog.get(PDFName.of('AcroForm'))) {
-      issues.push('Interactive form fields present — may contain submitted data')
+      issues.push('Interactive form fields present - may contain submitted data')
     }
 
     // Check 7: Text extraction to detect hidden text
     const extracted = await extractText(state.pdfBytes)
     const totalChars = extracted.reduce((s, p) => s + p.items.reduce((s2, it) => s2 + it.str.length, 0), 0)
     if (totalChars > 0) {
-      issues.push(`${totalChars} characters of extractable text remain — redacted text should be unextractable`)
+      issues.push(`${totalChars} characters of extractable text remain - redacted text should be unextractable`)
     }
 
     const safe = issues.length === 0
     setResult({ safe, issues })
-    onStatus(safe ? 'Redaction verification passed — no hidden data found.' : `Found ${issues.length} potential issue(s).`)
+    onStatus(safe ? 'Redaction verification passed - no hidden data found.' : `Found ${issues.length} potential issue(s).`)
   }
 
   return (
@@ -1941,7 +1941,7 @@ function RedactVerifySection({ state, onStatus }: { state: PdfFormatState; onSta
       {result && (
         <div style={{ marginTop: 8 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: result.safe ? 'var(--success)' : 'var(--danger)', marginBottom: 6 }}>
-            {result.safe ? 'Clean — no hidden data detected' : `${result.issues.length} issue(s) found`}
+            {result.safe ? 'Clean - no hidden data detected' : `${result.issues.length} issue(s) found`}
           </div>
           {result.issues.map((issue, i) => (
             <div key={i} style={{ padding: '3px 0', fontSize: 11, borderBottom: '1px solid var(--border)' }}>

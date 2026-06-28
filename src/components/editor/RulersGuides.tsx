@@ -208,7 +208,7 @@ export function RulersGuides({
           <div
             key={`${g.axis}-${i}`}
             style={style}
-            title={`${g.axis === 'v' ? 'Vertical' : 'Horizontal'} guide @ ${Math.round(g.pos)}px — drag to move, double-click to delete`}
+            title={`${g.axis === 'v' ? 'Vertical' : 'Horizontal'} guide @ ${Math.round(g.pos)}px - drag to move, double-click to delete`}
             onPointerDown={onGuidePointerDown(i)}
             onPointerMove={onGuidePointerMove(i, g.axis)}
             onPointerUp={onGuidePointerUp(i)}

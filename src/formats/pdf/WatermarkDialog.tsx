@@ -115,7 +115,7 @@ export default function WatermarkDialog({ onClose, onApply, onUnbake }: Props) {
                 fontSize: 12,
                 cursor: text.trim() ? 'pointer' : 'not-allowed',
               }}
-              title="Strip BT...ET text blocks containing this text from every page (G5: un-bake watermark text from already-baked content streams). Best-effort — works for Helvetica/standard-14 watermarks like Open Satchel's pd-lib drawText path emits."
+              title="Strip BT...ET text blocks containing this text from every page (G5: un-bake watermark text from already-baked content streams). Best-effort - works for Helvetica/standard-14 watermarks like Open Satchel's pd-lib drawText path emits."
             >
               Remove this text from PDF
             </button>

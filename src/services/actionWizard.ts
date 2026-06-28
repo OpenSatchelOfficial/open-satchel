@@ -168,7 +168,7 @@ export async function executeWorkflow(
             current = new Uint8Array(new TextEncoder().encode(res.fullText))
             format = 'txt'
           }
-          log.push(`  OCR complete — ${res.ocrPageData.reduce((s, p) => s + p.words.length, 0)} words${res.suspects.length > 0 ? `, ${res.suspects.length} suspects` : ''}`)
+          log.push(`  OCR complete - ${res.ocrPageData.reduce((s, p) => s + p.words.length, 0)} words${res.suspects.length > 0 ? `, ${res.suspects.length} suspects` : ''}`)
           break
         }
         case 'sign': {
@@ -206,7 +206,7 @@ export async function executeWorkflow(
           break
         }
         default:
-          log.push(`  Unknown step type: ${step.type} — skipped`)
+          log.push(`  Unknown step type: ${step.type} - skipped`)
       }
     } catch (err) {
       log.push(`  ERROR: ${(err as Error).message}`)
@@ -261,7 +261,7 @@ export const PRESET_WORKFLOWS: ActionWorkflow[] = [
   // preset strips DOCUMENT-level hidden data; it does NOT remove visible
   // page content. Redaction is its own verified tool.
   {
-    name: 'Prep for Publication (sanitize + flatten + Bates — does NOT redact)',
+    name: 'Prep for Publication (sanitize + flatten + Bates - does NOT redact)',
     steps: [
       { type: 'sanitize', label: 'Strip metadata, JS, external refs (page content is NOT redacted)' },
       { type: 'flatten_transparency', label: 'Flatten transparency' },
@@ -285,7 +285,7 @@ export const PRESET_WORKFLOWS: ActionWorkflow[] = [
     name: 'Pause for Review (example interactive chain)',
     steps: [
       { type: 'sanitize', label: 'Strip hidden data' },
-      { type: 'prompt', label: 'Review sanitized output', options: { message: 'Check the file before continuing — click Continue to compress, or Cancel to stop.' } },
+      { type: 'prompt', label: 'Review sanitized output', options: { message: 'Check the file before continuing - click Continue to compress, or Cancel to stop.' } },
       { type: 'compress', label: 'Optimize' },
     ]
   },

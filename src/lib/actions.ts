@@ -75,7 +75,7 @@ export function showLegalGuaranteeAppliedToast(
     {
       severity: 'info' as const,
       message:
-        '✅ Redaction applied permanently — the redacted page(s) were flattened to secured ' +
+        '✅ Redaction applied permanently - the redacted page(s) were flattened to secured ' +
         'images. The content is destroyed at the pixel level and there is no undo.',
     },
     ...extraItems,
@@ -86,7 +86,7 @@ export function showLegalGuaranteeAppliedToast(
     items,
     hiddenInfoCount,
     action: {
-      label: 'Done — re-enable autosave',
+      label: 'Done - re-enable autosave',
       run: () => useUIStore.getState().setLegalGuaranteeRedaction(false),
     },
     // Lingers — the user should get a clear chance to take the autosave action.

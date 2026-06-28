@@ -89,7 +89,7 @@ export default function StatusBar() {
       {legalGuarantee && (
         <span
           data-testid="statusbar-legal-guarantee"
-          title="Legal Guarantee redaction is ON — redacted pages flatten to secured images on save; autosave is locked off."
+          title="Legal Guarantee redaction is ON - redacted pages flatten to secured images on save; autosave is locked off."
           style={{ color: 'var(--accent)', fontWeight: 600 }}
         >
           🔒 Legal Guarantee · autosave locked off

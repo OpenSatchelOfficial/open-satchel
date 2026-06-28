@@ -245,7 +245,7 @@ export default function ActionWizardDialog({ tabId, onClose }: Props) {
               }} />
             </div>
             <div style={{ fontSize: 10, color: 'var(--text-secondary)', marginTop: 2 }}>
-              {progress.step}/{progress.total} — {progress.label}
+              {progress.step}/{progress.total} - {progress.label}
             </div>
           </div>
         )}

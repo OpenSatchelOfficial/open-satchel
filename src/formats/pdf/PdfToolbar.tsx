@@ -539,7 +539,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <OrderedToolGroup
                 groupId="highlight"
                 items={{
-                  highlight: () => <RBtn text="Highlight" active={ui.tool === 'highlight'} onClick={() => ui.setTool('highlight')} title="Highlight selected text — right-click to reset tool order" />,
+                  highlight: () => <RBtn text="Highlight" active={ui.tool === 'highlight'} onClick={() => ui.setTool('highlight')} title="Highlight selected text - right-click to reset tool order" />,
                   highlight_area: () => <RBtn text="Highlight Area" active={ui.tool === 'highlight_area'} onClick={() => ui.setTool('highlight_area')} title="Drag a rectangle to highlight" />,
                   underline: () => <RBtn text="Underline" active={ui.tool === 'underline'} onClick={() => ui.setTool('underline')} title="Underline selected text" />,
                   strikethrough: () => <RBtn text="Strikethrough" active={ui.tool === 'strikethrough'} onClick={() => ui.setTool('strikethrough')} title="Strike through selected text" />,
@@ -575,7 +575,7 @@ export default function PdfToolbar({ tabId }: FormatViewerProps) {
               <div style={{ display: 'flex', gap: 3, marginTop: 2 }}>
                 {(['thin', 'medium', 'thick'] as const).map((w) => (
                   <button key={w} onClick={() => ui.setHighlightWidth(w)}
-                    title={`${w} — ${w === 'thin' ? '4' : w === 'medium' ? '8' : '14'}pt`}
+                    title={`${w} - ${w === 'thin' ? '4' : w === 'medium' ? '8' : '14'}pt`}
                     style={{
                       padding: '2px 6px', fontSize: 9,
                       background: ui.highlightWidth === w ? 'var(--accent)' : 'var(--bg-surface)',

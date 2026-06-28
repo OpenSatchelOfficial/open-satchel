@@ -121,7 +121,7 @@ export async function applyRedactions(
       area: 'redact.signature_invalidated',
       detail:
         'this document is digitally signed; redaction rewrites the whole file to remove the ' +
-        'content permanently, which invalidates the existing signature — the saved copy is no ' +
+        'content permanently, which invalidates the existing signature - the saved copy is no ' +
         'longer signed. Re-sign it after redacting if a signature is required.',
     })
   }
@@ -175,7 +175,7 @@ export async function applyRedactions(
       area: 'redact.legal_guarantee_flatten',
       detail:
         `Legal Guarantee: redacted page(s) ${flattenedPages.map((p) => p + 1).join(', ')} ` +
-        'were flattened to a secured image by construction — the original content stream was ' +
+        'were flattened to a secured image by construction - the original content stream was ' +
         'replaced and text/vectors under the marks are destroyed at the pixel level (those pages ' +
         'lose selectable text)',
     })
@@ -199,7 +199,7 @@ export async function applyRedactions(
         area: 'redact.glyph_procedure_rasterized',
         detail:
           `page ${page + 1}: a glyph-procedure construct (${constructs.join('; ')}) is present on a ` +
-          'redacted page — a Type3/Form-XObject/image-mask glyph is invisible to the text and ' +
+          'redacted page - a Type3/Form-XObject/image-mask glyph is invisible to the text and ' +
           'geometry redaction witnesses, so the page was rasterized (flattened to a secured image) ' +
           'to remove it permanently. The page loses selectable text.',
         pageIndex: page,
@@ -305,7 +305,7 @@ export async function applyRedactions(
     if (noOpPages.length > 0) {
       throw new Error(
         'Redaction removed no content from the redacted region(s) on page(s) ' +
-          `${noOpPages.map((p) => p + 1).join(', ')} — the box covered no detectable text or ` +
+          `${noOpPages.map((p) => p + 1).join(', ')} - the box covered no detectable text or ` +
           'graphics. This commonly means the box is in the wrong place: the page may be rotated ' +
           '(/Rotate) or use a non-zero MediaBox/CropBox origin, so display-frame coordinates do ' +
           'not match the content. The save was refused rather than certified, because a redaction ' +
@@ -346,7 +346,7 @@ export async function applyRedactions(
 
   if (verdict.failures.length > 0) {
     throw new Error(
-      'Redaction verification failed — redacted content would survive in the saved file, ' +
+      'Redaction verification failed - redacted content would survive in the saved file, ' +
         'so the save was refused. ' + verdict.failures.join('; '),
     )
   }
@@ -486,10 +486,10 @@ async function probeGlyphProcedurePages(
       area: 'redact.glyph_procedure_rasterized',
       detail:
         `glyph-procedure detector unavailable (${err instanceof Error ? err.message : String(err)}); ` +
-        'every redacted page was rasterized as a precaution — a Type3/Form-XObject/image-mask glyph ' +
+        'every redacted page was rasterized as a precaution - a Type3/Form-XObject/image-mask glyph ' +
         'could otherwise survive a clean verdict',
     })
-    return new Map(pages.map((p) => [p, ['detector unavailable — fail-closed raster']]))
+    return new Map(pages.map((p) => [p, ['detector unavailable - fail-closed raster']]))
   }
 }
 
@@ -514,7 +514,7 @@ async function probeVectorContentPages(
     collector?.record({
       area: 'redact.vector_content_rasterized',
       detail:
-        `page ${pageIndex + 1}: ${why} — vector graphics (outlined text, a chart, a signature, a ` +
+        `page ${pageIndex + 1}: ${why} - vector graphics (outlined text, a chart, a signature, a ` +
         'logo) are invisible to the text and image redaction witnesses, so the page was rasterized ' +
         '(flattened to a secured image) to remove the content permanently. The page loses selectable text.',
       severity: 'fidelity',
@@ -569,7 +569,7 @@ async function probeVectorContentPages(
       collector?.record({
         area: 'redact.vector_content_rasterized',
         detail:
-          `page ${p + 1}: ${why} — raw vector graphics under a mark could otherwise survive a clean ` +
+          `page ${p + 1}: ${why} - raw vector graphics under a mark could otherwise survive a clean ` +
           'verdict, so the page was flattened to a secured image (it loses selectable text).',
         severity: 'fidelity',
         pageIndex: p,
@@ -1053,7 +1053,7 @@ export function classifyHarvestedNeedles(
         area: 'redact.structural_token_needle',
         detail:
           `redacted text '${truncateForDetail(needle.text)}' matches PDF structural vocabulary; ` +
-          'byte-level scan skipped for it — decoded and region verification still apply',
+          'byte-level scan skipped for it - decoded and region verification still apply',
         pageIndex: needle.pageIndex,
       })
     }
@@ -1067,7 +1067,7 @@ export function classifyHarvestedNeedles(
         detail:
           `redacted text '${truncateForDetail(needle.text)}' also occurs outside the redacted ` +
           `region(s) (${docCount} total vs ${harvested} under regions); document-wide ` +
-          'verification skipped for it — region verification still applies',
+          'verification skipped for it - region verification still applies',
         pageIndex: needle.pageIndex,
       })
     }
@@ -1283,7 +1283,7 @@ export async function verifyRedactionPermanence(
     })
     if (result.startxref_markers !== 1) {
       failures.push(
-        `output has ${result.startxref_markers} startxref markers — a prior document ` +
+        `output has ${result.startxref_markers} startxref markers - a prior document ` +
           'revision (carrying pre-redaction bytes) may survive in the file',
       )
     }
@@ -1308,7 +1308,7 @@ export async function verifyRedactionPermanence(
         area: 'redact.scan_streams_undecodable',
         detail:
           `${undecodable} of ${result.total_streams_scanned} stream object(s) could not be ` +
-          'decompressed (non-Flate filters) — the byte-level scan is inconclusive for them; ' +
+          'decompressed (non-Flate filters) - the byte-level scan is inconclusive for them; ' +
           'decoded-text and image-pixel layers still verified the regions',
       })
     }
@@ -1319,14 +1319,14 @@ export async function verifyRedactionPermanence(
       collector?.record({
         area: 'redact.attachments_present',
         detail:
-          `${result.embedded_files} embedded file(s) present — attachments cannot be ` +
+          `${result.embedded_files} embedded file(s) present - attachments cannot be ` +
           'scanned for redacted content; remove attachments before redacting, or verify them manually',
       })
     }
   } catch (err) {
     failures.push(
       `byte-level permanence verification unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-        '— refusing to certify the redaction',
+        '- refusing to certify the redaction',
     )
   }
 
@@ -1337,7 +1337,7 @@ export async function verifyRedactionPermanence(
   } catch (err) {
     failures.push(
       `decoded-text verification unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-        '— refusing to certify the redaction',
+        '- refusing to certify the redaction',
     )
   }
   if (outSnapshot) {
@@ -1433,7 +1433,7 @@ export async function verifyRedactionPermanence(
   } catch (err) {
     failures.push(
       `annotation verification unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-        '— refusing to certify the redaction',
+        '- refusing to certify the redaction',
     )
   }
 
@@ -1448,7 +1448,7 @@ export async function verifyRedactionPermanence(
   } catch (err) {
     failures.push(
       `image-pixel verification unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-        '— refusing to certify the redaction',
+        '- refusing to certify the redaction',
     )
   }
 
@@ -1480,7 +1480,7 @@ export async function verifyRedactionPermanence(
         failingPages.add(probe.page_index)
         failures.push(
           `a second PDF engine (pdfium) still finds text under a redacted region on page ` +
-            `${probe.page_index + 1} — a pdfjs-blind CID/exotic-font glyph may have survived`,
+            `${probe.page_index + 1} - a pdfjs-blind CID/exotic-font glyph may have survived`,
         )
       }
     }
@@ -1490,7 +1490,7 @@ export async function verifyRedactionPermanence(
     // block at security severity rather than certify on a shared blind spot.
     failures.push(
       `independent-engine (pdfium) region witness unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-        '— a CID/exotic-font region cannot be certified clean; refusing to certify the redaction',
+        '- a CID/exotic-font region cannot be certified clean; refusing to certify the redaction',
     )
     collector?.record({
       area: 'redact.cid_scan_inconclusive',
@@ -1586,7 +1586,7 @@ export async function verifyRedactionPermanence(
               `an independent engine (pdfium) renders the redacted region on page ${g.page + 1} as only ` +
                 `${Math.round(pr.fill_fraction * 100)}% the redaction fill color` +
                 (pr.bad_pixel ? ` (e.g. rgb(${pr.bad_pixel.join(',')}))` : '') +
-                ' — the raster burn was displaced or did not apply; content may survive at the true location',
+                ' - the raster burn was displaced or did not apply; content may survive at the true location',
             )
           }
         })
@@ -1602,7 +1602,7 @@ export async function verifyRedactionPermanence(
     } catch (err) {
       failures.push(
         `independent-engine (pdfium) fill witness unavailable (${err instanceof Error ? err.message : String(err)}) ` +
-          '— a rasterized redaction region cannot be confirmed opaque; refusing to certify the redaction',
+          '- a rasterized redaction region cannot be confirmed opaque; refusing to certify the redaction',
       )
     }
   }
@@ -1708,11 +1708,11 @@ export function imageRegionPixelFailures(
 ): string[] {
   const { width: w, height: h, data } = img
   if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
-    return ['image has invalid dimensions — pixels cannot be verified']
+    return ['image has invalid dimensions - pixels cannot be verified']
   }
   const det = ctm[0] * ctm[3] - ctm[1] * ctm[2]
   if (!Number.isFinite(det) || Math.abs(det) < 1e-9) {
-    return ['image transform is not invertible — pixels cannot be verified']
+    return ['image transform is not invertible - pixels cannot be verified']
   }
   const inv: Matrix = [
     ctm[3] / det,
@@ -1745,7 +1745,7 @@ export function imageRegionPixelFailures(
     }
   }
   if (!getPixel) {
-    return [`image pixel format not decodable (${w}×${h}, ${data.length} bytes) — pixels cannot be verified`]
+    return [`image pixel format not decodable (${w}×${h}, ${data.length} bytes) - pixels cannot be verified`]
   }
 
   const failures: string[] = []
@@ -1784,7 +1784,7 @@ export function imageRegionPixelFailures(
     if (bad) {
       failures.push(
         `image pixels under a redacted region are NOT the redaction fill ` +
-          `(pixel ${bad[0]},${bad[1]} is rgb(${bad[2].join(',')})) — content survives inside the image`,
+          `(pixel ${bad[0]},${bad[1]} is rgb(${bad[2].join(',')})) - content survives inside the image`,
       )
     }
   }
@@ -2155,7 +2155,7 @@ async function sweepImagePixelsInRegions(
             failingPages.add(pageIndex)
             failures.push(
               `an image mask is painted across a redacted region on page ${pageIndex + 1} ` +
-                '— stencil content cannot be certified as redacted',
+                '- stencil content cannot be certified as redacted',
             )
             // R9c: this is the unscanned-stream-overlaps-a-region case
             // promoted to a SECURITY block (geometry-true — it only fires
@@ -2165,7 +2165,7 @@ async function sweepImagePixelsInRegions(
               area: 'redact.image_undecodable_under_region',
               detail:
                 `page ${pageIndex + 1}: an image mask overlaps a redacted region and its ` +
-                'stencil pixels cannot be certified clean — the redaction was refused',
+                'stencil pixels cannot be certified clean - the redaction was refused',
               pageIndex,
             })
             continue
@@ -2198,7 +2198,7 @@ async function sweepImagePixelsInRegions(
               area: 'redact.image_undecodable_under_region',
               detail:
                 `page ${pageIndex + 1}: an image overlapping a redacted region could not be ` +
-                'decoded for pixel verification — the redaction was refused',
+                'decoded for pixel verification - the redaction was refused',
               pageIndex,
             })
             continue

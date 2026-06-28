@@ -138,7 +138,7 @@ export default function CertEncryptDialog({ tabId, onClose }: Props) {
       open
       onClose={onClose}
       title="Encrypt to recipient certificates"
-      subtitle="V=5 AES-256 + Adobe.PubSec — only matching private keys can decrypt."
+      subtitle="V=5 AES-256 + Adobe.PubSec - only matching private keys can decrypt."
       icon={<CertIcon />}
       data-testid="cert-encrypt-dialog"
       footer={

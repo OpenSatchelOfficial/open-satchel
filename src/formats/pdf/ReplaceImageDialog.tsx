@@ -107,7 +107,7 @@ export default function ReplaceImageDialog({ tabId, onClose }: Props) {
         </div>
 
         <p style={{ margin: '0 0 10px 0', fontSize: 11, color: 'var(--text-secondary)' }}>
-          Pick an embedded image from the document, then select a replacement file. The image XObject's stream is rewritten in place — position + scale from the content stream's cm are preserved.
+          Pick an embedded image from the document, then select a replacement file. The image XObject's stream is rewritten in place - position + scale from the content stream's cm are preserved.
         </p>
 
         <div style={{ flex: 1, overflowY: 'auto' }}>

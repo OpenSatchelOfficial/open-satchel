@@ -130,7 +130,7 @@ async function bakeViaPathRoute(
       throw new Error(
         `[engine-bake] ${cmd} returned unexpected shape (keys: ${
           summary ? Object.keys(summary).join(',') : String(summary)
-        }) — expected flattened WriteSummary`,
+        }) - expected flattened WriteSummary`,
       )
     }
     const bytes = await readFile(outPath)

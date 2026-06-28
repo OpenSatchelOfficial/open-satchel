@@ -59,7 +59,7 @@ export async function upgradeR5ToR6(
   })
   const ctx = doc.context
   const encryptRef = ctx.trailerInfo.Encrypt
-  if (!encryptRef) throw new Error('upgradeR5ToR6: no /Encrypt dict — not encrypted')
+  if (!encryptRef) throw new Error('upgradeR5ToR6: no /Encrypt dict - not encrypted')
   const encDict = ctx.lookup(encryptRef)
   if (!(encDict instanceof PDFDict)) throw new Error('upgradeR5ToR6: /Encrypt is not a dictionary')
 
@@ -108,14 +108,14 @@ export async function upgradeR5ToR6(
   // we were given doesn't match what zga used.
   const uHashR5Actual = sha256(concat(bytesOfPassword(userPw), uValidationSalt))
   if (!bytesEqual(uHashR5Actual, UBytes.slice(0, 32))) {
-    throw new Error('upgradeR5ToR6: R=5 /U hash mismatch — userPassword does not match the one zga encrypted with')
+    throw new Error('upgradeR5ToR6: R=5 /U hash mismatch - userPassword does not match the one zga encrypted with')
   }
 
   // Same verification on owner path. For R=5 /O, the hash is
   // SHA-256(password || validation_salt || U_first_48_bytes).
   const oHashR5Actual = sha256(concat(bytesOfPassword(ownerPw), oValidationSalt, UBytes))
   if (!bytesEqual(oHashR5Actual, OBytes.slice(0, 32))) {
-    throw new Error('upgradeR5ToR6: R=5 /O hash mismatch — ownerPassword does not match')
+    throw new Error('upgradeR5ToR6: R=5 /O hash mismatch - ownerPassword does not match')
   }
 
   // Step 2: Recompute /U, /O, /UE, /OE, /Perms with R=6 hash 2.B.

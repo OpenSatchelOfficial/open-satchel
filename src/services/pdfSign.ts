@@ -463,7 +463,7 @@ export async function verifySignatures(bytes: Uint8Array): Promise<VerifyResult[
             const userTrusted = isTrusted(p7.certFingerprint)
             if (p7.selfSigned && !userTrusted) {
               summary = 'valid-untrusted'
-              message = 'Cryptographically valid. Self-signed — trust this signer manually to remove the warning.'
+              message = 'Cryptographically valid. Self-signed - trust this signer manually to remove the warning.'
             } else {
               summary = 'valid'
               message = userTrusted

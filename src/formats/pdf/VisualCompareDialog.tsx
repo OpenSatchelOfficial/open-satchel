@@ -59,7 +59,7 @@ export default function VisualCompareDialog({ tabId, onClose }: Props) {
     }} onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div style={{ background: 'var(--bg-primary)', borderRadius: 8, width: '92vw', height: '92vh', display: 'flex', flexDirection: 'column', border: '1px solid var(--border)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', borderBottom: '1px solid var(--border)' }}>
-          <h3 style={{ margin: 0, fontSize: 15 }}>Compare — side by side</h3>
+          <h3 style={{ margin: 0, fontSize: 15 }}>Compare - side by side</h3>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
             {!rightBytes && <button data-testid="vc-pick" onClick={pickFile} style={{ padding: '6px 12px', background: 'var(--accent)', color: 'var(--bg-primary)', border: 'none', borderRadius: 4, cursor: 'pointer' }}>Pick second PDF…</button>}
             {diff && (

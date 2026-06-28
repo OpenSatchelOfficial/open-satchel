@@ -668,13 +668,13 @@ export function exportCommentsAsRtf(comments: Comment[], docTitle = 'Document'):
   // Header
   parts.push('{\\rtf1\\ansi\\ansicpg1252\\deff0')
   parts.push('{\\fonttbl{\\f0 Calibri;}}')
-  parts.push('{\\info{\\title ' + rtfEscape(`Comments Summary — ${docTitle}`) + '}}')
+  parts.push('{\\info{\\title ' + rtfEscape(`Comments Summary - ${docTitle}`) + '}}')
   parts.push('\\fs28\\b ' + rtfEscape('Comments Summary') + '\\b0\\fs24\\par')
   parts.push('\\fs20 ' + rtfEscape(docTitle) + '\\par')
   parts.push(
     '\\fs18 ' +
       rtfEscape(
-        `Generated ${new Date().toLocaleString()} — ${sorted.length} comment${sorted.length === 1 ? '' : 's'}`,
+        `Generated ${new Date().toLocaleString()} - ${sorted.length} comment${sorted.length === 1 ? '' : 's'}`,
       ) +
       '\\par\\par',
   )

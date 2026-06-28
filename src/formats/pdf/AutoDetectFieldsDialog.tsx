@@ -95,7 +95,7 @@ export default function AutoDetectFieldsDialog({ tabId, onClose }: Props) {
 
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
           Scans rasterized pages for underlines (→ text fields) and small empty squares (→ checkboxes).
-          Review detections before committing — auto-detect is heuristic, not semantic.
+          Review detections before committing - auto-detect is heuristic, not semantic.
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }}>

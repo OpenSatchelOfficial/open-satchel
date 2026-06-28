@@ -197,7 +197,7 @@ class Parser {
       }
       if (id === 'true') return { type: 'num', v: 1 }
       if (id === 'false') return { type: 'num', v: 0 }
-      throw new Error(`Bare identifier '${id}' — use {${id}} for a field ref`)
+      throw new Error(`Bare identifier '${id}' - use {${id}} for a field ref`)
     }
     throw new Error(`Unexpected character '${c}' at position ${this.i}`)
   }

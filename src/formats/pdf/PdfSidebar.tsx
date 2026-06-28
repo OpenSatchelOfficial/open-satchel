@@ -271,7 +271,7 @@ function PageThumbnail({
       onDragEnd={onDragEnd}
       onClick={onClick}
       onDoubleClick={onJumpTo}
-      title={`Page ${displayIndex + 1} — double-click to jump`}
+      title={`Page ${displayIndex + 1} - double-click to jump`}
       style={{
         position: 'relative', padding: 4, marginBottom: 4, borderRadius: 4,
         border: isDragOver ? '2px dashed var(--accent)' : active ? '2px solid var(--accent)' : '2px solid transparent',
