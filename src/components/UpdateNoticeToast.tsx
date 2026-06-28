@@ -3,6 +3,7 @@ import {
   checkForAppUpdate,
   humanUpdateError,
   installPendingAppUpdate,
+  restartToApplyUpdate,
   type AppUpdateInfo,
   type AppUpdateProgress,
 } from '../services/appUpdater'
@@ -11,6 +12,7 @@ type ToastState =
   | { kind: 'idle' }
   | { kind: 'available'; update: AppUpdateInfo }
   | { kind: 'installing'; update: AppUpdateInfo; message: string }
+  | { kind: 'staged'; update: AppUpdateInfo; message?: string }
   | { kind: 'error'; message: string }
 
 export default function UpdateNoticeToast() {
@@ -44,8 +46,25 @@ export default function UpdateNoticeToast() {
           message: progressMessage(progress),
         })
       })
+      // Control returns here only when the app did not auto-restart during the
+      // installer handoff, so the new version is staged and needs a restart.
+      setState({ kind: 'staged', update })
     } catch (e: unknown) {
       setState({ kind: 'error', message: humanUpdateError(e) })
+    }
+  }
+
+  async function restart(update: AppUpdateInfo) {
+    setState({ kind: 'staged', update, message: 'Restarting...' })
+    try {
+      await restartToApplyUpdate()
+    } catch {
+      setState({
+        kind: 'staged',
+        update,
+        message:
+          'Could not restart automatically. Close and reopen Open Satchel to finish updating.',
+      })
     }
   }
 
@@ -78,6 +97,31 @@ export default function UpdateNoticeToast() {
         <>
           <div style={titleStyle}>Installing {state.update.version}</div>
           <div style={bodyStyle}>{state.message}</div>
+        </>
+      )}
+
+      {state.kind === 'staged' && (
+        <>
+          <div style={titleStyle}>Update {state.update.version} downloaded</div>
+          <div style={bodyStyle}>
+            {state.message ?? 'Restart to finish installing.'}
+          </div>
+          <div style={actionsStyle}>
+            <button
+              data-testid="update-restart"
+              onClick={() => void restart(state.update)}
+              style={primaryBtnStyle}
+            >
+              Restart now
+            </button>
+            <button
+              data-testid="update-restart-later"
+              onClick={() => setState({ kind: 'idle' })}
+              style={secondaryBtnStyle}
+            >
+              Later
+            </button>
+          </div>
         </>
       )}
 

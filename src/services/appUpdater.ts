@@ -35,12 +35,18 @@ export async function checkForAppUpdate(): Promise<AppUpdateCheckResult> {
   return { kind: 'available', update: toInfo(update) }
 }
 
+/** Outcome of installPendingAppUpdate. 'staged' means the new version was
+ *  downloaded and written to disk but the running app must restart to apply it. */
+export type AppUpdateInstallOutcome = 'staged'
+
 export async function installPendingAppUpdate(
   onProgress?: (progress: AppUpdateProgress) => void,
-): Promise<void> {
+): Promise<AppUpdateInstallOutcome> {
   if (!pendingUpdate) {
     const result = await checkForAppUpdate()
-    if (result.kind !== 'available' || !pendingUpdate) return
+    if (result.kind !== 'available' || !pendingUpdate) {
+      throw new Error('No update is available to install.')
+    }
   }
 
   let downloaded = 0
@@ -65,12 +71,24 @@ export async function installPendingAppUpdate(
 
   pendingUpdate = null
 
-  try {
-    await relaunch()
-  } catch {
-    // Windows exits during installer handoff, so this line is mostly for
-    // macOS/Linux. If relaunch fails, the installed update is still staged.
-  }
+  // Reaching this point means the app is still running, so the new version is
+  // staged on disk but not yet applied. We deliberately do NOT relaunch here:
+  // an automatic restart could close the app while the user has unsaved work,
+  // and on some Windows setups the installer handoff does not exit the app on
+  // its own (which left earlier builds stuck on "Installing..." forever). The
+  // caller shows a "restart to finish" prompt and applies the update via
+  // restartToApplyUpdate() when the user is ready. On platforms where
+  // downloadAndInstall exits the app during the handoff, this line is never
+  // reached and the update applies seamlessly.
+  return 'staged'
+}
+
+/** Apply a staged update by relaunching into the new version. Wired to the
+ *  "Restart now" button on the update toast. The process normally exits before
+ *  this resolves; if it throws, the update is still staged and closing and
+ *  reopening the app applies it on the next launch. */
+export async function restartToApplyUpdate(): Promise<void> {
+  await relaunch()
 }
 
 export function humanUpdateError(error: unknown): string {

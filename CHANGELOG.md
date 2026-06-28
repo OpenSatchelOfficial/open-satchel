@@ -6,6 +6,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+## [0.5.2] - 2026-06-28
+
+### Fixed
+
+- **Update flow** - the in-app updater could download a new version but leave
+  the app running the old one, with the toast stuck on "Installing..." when
+  the installer handoff did not exit the app on its own. The updater now stages
+  the download and shows a clear "Update downloaded - Restart to finish" prompt
+  with a Restart button, so completing an update is always one click and never
+  stalls silently. The app no longer restarts on its own, so an update can
+  never close the app while you have unsaved work.
+
 ## [0.5.1] — 2026-06-28
 
 ### Fixed
