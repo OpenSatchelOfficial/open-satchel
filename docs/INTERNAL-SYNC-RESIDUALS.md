@@ -134,5 +134,17 @@ from `dist/`.**
 - `npm run build` (tsc --noEmit + vite build) — green; test bridge
   absent from `dist/`; tesseract + zgapdfsigner assets copied into
   `dist/`.
-- `npm run tauri:build` — full NSIS + MSI installer + updater artifacts
-  (see the build log / `target/release/bundle/`).
+- `npm run tauri:build` — full pipeline green: vite build → release
+  cargo+LTO build/link → WiX MSI → NSIS → updater signing. Produced
+  `Open Satchel_0.5.0_x64-setup.exe` (~50 MB) and
+  `Open Satchel_0.5.0_x64_en-US.msi` (~53 MB) under
+  `target/release/bundle/`, each with a `.sig`, and staged
+  `pdfium.dll` via `bundle.resources`.
+
+  **Owner caveat:** the `.sig` updater artifacts from that build were
+  signed with a *throwaway* key (to prove the pipeline), so tauri warns
+  the secret key "does not match the public key from
+  `plugins > updater > pubkey`". That warning is expected — it confirms
+  the embedded owner pubkey is wired correctly. For the real release the
+  owner must rebuild with `TAURI_SIGNING_PRIVATE_KEY` set to the private
+  key that matches the embedded pubkey (the release CI does this).
