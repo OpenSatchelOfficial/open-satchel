@@ -1,0 +1,70 @@
+# satchel-core — the UI-independent document core.
+#
+# Discipline rules (docs/NATIVE-REWRITE-PLAN.md §2, enforced by
+# scripts/core-gates.mjs):
+#   1. No UI types in core — no widget/event/toolkit crates, ever.
+#   2. IO behind traits — DocumentSource/DocumentSink, no direct
+#      std::fs (clippy disallowed-methods/types, see clippy.toml).
+#   3. No native-only crates in the dependency tree — the default
+#      feature set must compile to wasm32-unknown-unknown.
+#   4. Never *require* threads — parallelism only behind a feature.
+#   5. (Renderer rule applies to the future shell, not this crate.)
+#   6. Every pub fn is a future SDK call — stable, documented.
+
+[package]
+name = "satchel-core"
+version = "0.1.0"
+description = "UI-independent document core for Open Satchel"
+edition = "2021"
+rust-version = "1.77"
+license = "AGPL-3.0-only"
+
+[features]
+default = []
+# Parser/store backend over lopdf (pinned 0.32 workspace-wide; bump
+# only on corpus regression retest). Off by default: the core's
+# default feature set is what the wasm32 gate checks, and lopdf is
+# not yet proven wasm-clean. Shells opt in explicitly.
+lopdf-backend = ["dep:lopdf"]
+# CMS EnvelopedData on RustCrypto — the native envelope builder for
+# certificate-based PDF encryption (A10). PROMOTED from spike status
+# 2026-06-11 (Night-2 decision #3): the shell builds recipient
+# envelopes here instead of node-forge. Still feature-gated: the
+# wasm32 gate checks default features and the RustCrypto set hasn't
+# been wasm-verified yet.
+crypto = [
+    "dep:cms",
+    "dep:der",
+    "dep:x509-cert",
+    "dep:rsa",
+    "dep:aes",
+    "dep:cbc",
+    "dep:rand",
+]
+
+[[example]]
+name = "cms_wrap"
+required-features = ["crypto"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+lopdf = { version = "0.32", optional = true }
+# Layout-intelligence classifier port carries the TS regexes
+# (list markers, money/date, invoice/form vocab) verbatim. Pure
+# Rust, wasm-clean.
+regex = "1"
+# The classifier compiles its regexes once.
+once_cell = "1"
+# crypto-spike deps (RustCrypto; see the feature comment above).
+cms = { version = "0.2", features = ["builder"], optional = true }
+der = { version = "0.7", features = ["alloc", "pem"], optional = true }
+x509-cert = { version = "0.2", features = ["pem"], optional = true }
+rsa = { version = "0.9", optional = true }
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", features = ["alloc"], optional = true }
+rand = { version = "0.8", optional = true }
+
+[dev-dependencies]
+proptest = "1"

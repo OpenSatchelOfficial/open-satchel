@@ -225,6 +225,21 @@ fn spawn_worker(exe: &PathBuf) -> Result<Child> {
         .map_err(|e| AppError::Pdf(format!("spawn pdfium_worker {}: {e}", exe.display())))
 }
 
+/// Whether the pdfium_worker sidecar is locatable (the `OS_PDFIUM_WORKER_EXE`
+/// override, else beside the current exe). Cheap — a path + existence
+/// check, no process spawn.
+///
+/// Session 10: a packaged 1.0 build ships pdfium.dll but NOT the worker
+/// (it is a bin in the same cargo package, which Tauri's build-time
+/// resource validation can't bundle without a circular dependency — see
+/// docs/RELEASE.md §0). Without this, `render_cache` would attempt — and
+/// fail — a worker spawn, then log, on EVERY render and every prefetched
+/// page before falling back. `pool_enabled` consults this so a
+/// worker-less build takes the in-process render path directly.
+pub fn worker_available() -> bool {
+    locate_worker_exe().is_ok()
+}
+
 fn locate_worker_exe() -> Result<PathBuf> {
     // The worker is built as a peer bin target in the same
     // target/{debug,release} directory as the main exe. In dev

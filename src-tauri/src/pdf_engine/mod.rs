@@ -27,7 +27,8 @@ pub mod writer;
 
 pub use bake::bake_edit_model;
 pub use fonts::{
-    extract_fonts_for_page, extract_fonts_from_bytes, ExtractedFont, ExtractedFontFormat,
+    extract_font_payload_from_bytes, extract_font_payload_from_path, extract_fonts_for_page,
+    extract_fonts_from_bytes, DocFontExtraction, ExtractedFont, ExtractedFontFormat,
 };
 pub use render::{
     list_page_text_objects, page_count, render_page_to_png, render_page_to_png_with_skips,

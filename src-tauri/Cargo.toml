@@ -1,6 +1,6 @@
 [package]
 name = "open-satchel"
-version = "0.1.1"
+version = "0.5.0"
 description = "Free, local, no-paywall universal file editor"
 authors = ["Open Satchel"]
 edition = "2021"
@@ -24,6 +24,9 @@ tauri = { version = "2.1", features = [] }
 tauri-plugin-dialog = "2.0"
 tauri-plugin-fs = "2.0"
 tauri-plugin-shell = "2.0"
+# Synced from internal (0.5.0): the UI-independent document core — crypto
+# (cert envelopes) + the fallback/degradation channel the engine depends on.
+satchel-core = { path = "../crates/satchel-core", features = ["lopdf-backend", "crypto"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -118,9 +121,6 @@ tempfile = "3"
 
 # Release profile: maximum optimization, strip debug, LTO.
 # Matters for perf-vs-Electron story we promised the user.
-[profile.release]
-panic = "abort"
-codegen-units = 1
-lto = true
-opt-level = 3
-strip = true
+
+# [profile.release] moved to the workspace-root Cargo.toml (cargo ignores
+# profiles in member manifests once this is a workspace).

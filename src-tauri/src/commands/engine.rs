@@ -30,6 +30,26 @@ use tauri::ipc::Response;
 pub struct EngineSaveResult {
     pub bytes: Vec<u8>,
     pub summary: WriteSummary,
+    /// Session-1 degradation channel: every fallback the engine
+    /// recorded while producing these bytes (font substitution,
+    /// geometry defaults, encoding drops, …). Captured around the
+    /// worker-thread closure — the fallback sink is thread-local, so
+    /// the capture MUST wrap the same thread that runs the engine.
+    /// Empty on a clean run. NOTE: events recorded before a command
+    /// ERROR are dropped by design — the error string itself is the
+    /// observable, recorded TS-side as the fallback reason.
+    pub degradations: Vec<satchel_core::fallback::FallbackEvent>,
+}
+
+/// Response for the path-in/path-out bake/rewrite commands.
+/// `WriteSummary` is FLATTENED so existing frontend readers of
+/// `total_bytes` / `appended_bytes` / … keep working unchanged —
+/// `degradations` is purely additive on the wire.
+#[derive(Debug, Serialize)]
+pub struct EnginePathSaveResult {
+    #[serde(flatten)]
+    pub summary: WriteSummary,
+    pub degradations: Vec<satchel_core::fallback::FallbackEvent>,
 }
 
 /// Read `path`, append an incremental update that applies `patches`,
@@ -43,8 +63,14 @@ pub async fn engine_save_incremental(
     let original = tokio::fs::read(&path)
         .await
         .map_err(|e| AppError::Pdf(format!("read {path}: {e}")))?;
-    let (bytes, summary) = write_incremental(&original, &patches)?;
-    Ok(EngineSaveResult { bytes, summary })
+    let (result, degradations) =
+        satchel_core::fallback::capture(|| write_incremental(&original, &patches));
+    let (bytes, summary) = result?;
+    Ok(EngineSaveResult {
+        bytes,
+        summary,
+        degradations,
+    })
 }
 
 /// Render a single page to PNG via pdfium. Runs on the dedicated
@@ -248,8 +274,14 @@ pub async fn engine_bake(path: String, model: EditModel) -> Result<EngineSaveRes
     let original = tokio::fs::read(&path)
         .await
         .map_err(|e| AppError::Pdf(format!("read {path}: {e}")))?;
-    let (bytes, summary) = bake_edit_model(&original, &model)?;
-    Ok(EngineSaveResult { bytes, summary })
+    let (result, degradations) =
+        satchel_core::fallback::capture(|| bake_edit_model(&original, &model));
+    let (bytes, summary) = result?;
+    Ok(EngineSaveResult {
+        bytes,
+        summary,
+        degradations,
+    })
 }
 
 /// Bytes-based variant of [`engine_bake`]. The frontend holds
@@ -263,12 +295,19 @@ pub async fn engine_bake(path: String, model: EditModel) -> Result<EngineSaveRes
 /// their pd-lib bake path.
 #[tauri::command]
 pub async fn engine_bake_from_bytes(bytes: Vec<u8>, model: EditModel) -> Result<EngineSaveResult> {
-    let (out, summary) = tokio::task::spawn_blocking(move || bake_edit_model(&bytes, &model))
-        .await
-        .map_err(|e| AppError::Pdf(format!("engine-bake-from-bytes task panicked: {e}")))??;
+    // capture() INSIDE spawn_blocking: the fallback sink is
+    // thread-local, so it must be installed on the worker thread
+    // that actually runs the engine — not the async IPC thread.
+    let (result, degradations) = tokio::task::spawn_blocking(move || {
+        satchel_core::fallback::capture(|| bake_edit_model(&bytes, &model))
+    })
+    .await
+    .map_err(|e| AppError::Pdf(format!("engine-bake-from-bytes task panicked: {e}")))?;
+    let (out, summary) = result?;
     Ok(EngineSaveResult {
         bytes: out,
         summary,
+        degradations,
     })
 }
 
@@ -297,18 +336,24 @@ pub async fn engine_bake_to_path(
     input_path: String,
     output_path: String,
     model: EditModel,
-) -> Result<WriteSummary> {
-    let summary = tokio::task::spawn_blocking(move || -> Result<WriteSummary> {
-        let bytes = std::fs::read(&input_path)
-            .map_err(|e| AppError::Pdf(format!("read {input_path}: {e}")))?;
-        let (out, summary) = bake_edit_model(&bytes, &model)?;
-        std::fs::write(&output_path, &out)
-            .map_err(|e| AppError::Pdf(format!("write {output_path}: {e}")))?;
-        Ok(summary)
+) -> Result<EnginePathSaveResult> {
+    let (result, degradations) = tokio::task::spawn_blocking(move || {
+        satchel_core::fallback::capture(|| -> Result<WriteSummary> {
+            let bytes = std::fs::read(&input_path)
+                .map_err(|e| AppError::Pdf(format!("read {input_path}: {e}")))?;
+            let (out, summary) = bake_edit_model(&bytes, &model)?;
+            std::fs::write(&output_path, &out)
+                .map_err(|e| AppError::Pdf(format!("write {output_path}: {e}")))?;
+            Ok(summary)
+        })
     })
     .await
-    .map_err(|e| AppError::Pdf(format!("engine-bake-to-path task panicked: {e}")))??;
-    Ok(summary)
+    .map_err(|e| AppError::Pdf(format!("engine-bake-to-path task panicked: {e}")))?;
+    let summary = result?;
+    Ok(EnginePathSaveResult {
+        summary,
+        degradations,
+    })
 }
 
 /// Path-in/path-out variant of [`engine_rewrite_from_bytes`]. Same
@@ -321,18 +366,24 @@ pub async fn engine_rewrite_to_path(
     input_path: String,
     output_path: String,
     model: EditModel,
-) -> Result<WriteSummary> {
-    let summary = tokio::task::spawn_blocking(move || -> Result<WriteSummary> {
-        let bytes = std::fs::read(&input_path)
-            .map_err(|e| AppError::Pdf(format!("read {input_path}: {e}")))?;
-        let (out, summary) = rewrite_text_edits_in_place(&bytes, &model)?;
-        std::fs::write(&output_path, &out)
-            .map_err(|e| AppError::Pdf(format!("write {output_path}: {e}")))?;
-        Ok(summary)
+) -> Result<EnginePathSaveResult> {
+    let (result, degradations) = tokio::task::spawn_blocking(move || {
+        satchel_core::fallback::capture(|| -> Result<WriteSummary> {
+            let bytes = std::fs::read(&input_path)
+                .map_err(|e| AppError::Pdf(format!("read {input_path}: {e}")))?;
+            let (out, summary) = rewrite_text_edits_in_place(&bytes, &model)?;
+            std::fs::write(&output_path, &out)
+                .map_err(|e| AppError::Pdf(format!("write {output_path}: {e}")))?;
+            Ok(summary)
+        })
     })
     .await
-    .map_err(|e| AppError::Pdf(format!("engine-rewrite-to-path task panicked: {e}")))??;
-    Ok(summary)
+    .map_err(|e| AppError::Pdf(format!("engine-rewrite-to-path task panicked: {e}")))?;
+    let summary = result?;
+    Ok(EnginePathSaveResult {
+        summary,
+        degradations,
+    })
 }
 
 /// True text editing: rewrite the page's existing content stream in
@@ -352,13 +403,16 @@ pub async fn engine_rewrite_from_bytes(
     bytes: Vec<u8>,
     model: EditModel,
 ) -> Result<EngineSaveResult> {
-    let (out, summary) =
-        tokio::task::spawn_blocking(move || rewrite_text_edits_in_place(&bytes, &model))
-            .await
-            .map_err(|e| AppError::Pdf(format!("engine-rewrite task panicked: {e}")))??;
+    let (result, degradations) = tokio::task::spawn_blocking(move || {
+        satchel_core::fallback::capture(|| rewrite_text_edits_in_place(&bytes, &model))
+    })
+    .await
+    .map_err(|e| AppError::Pdf(format!("engine-rewrite task panicked: {e}")))?;
+    let (out, summary) = result?;
     Ok(EngineSaveResult {
         bytes: out,
         summary,
+        degradations,
     })
 }
 
@@ -454,4 +508,118 @@ pub async fn engine_extract_page_fonts_from_bytes(
             AppError::Pdf(format!("extract-page-fonts-from-bytes task panicked: {e}"))
         })??;
     Ok(fonts)
+}
+
+/// Session 4: targeted save-time extraction — find the embedded font
+/// program for `family` anywhere in the document and judge whether it
+/// can be REUSED for new text (TrueType + unicode cmap + glyph
+/// coverage of `codepoints`). The overlay bake's resolution chain
+/// tries this FIRST, before system fonts: the document's own typeface
+/// is the faithful choice. Returns a tagged status — `usable` /
+/// `unusable` (embedded but not re-encodable: the caller records
+/// font.doc_embed_unusable) / `not_found` (silent; chain proceeds).
+#[tauri::command]
+pub async fn pdf_extract_font_payload(
+    bytes: Vec<u8>,
+    family: String,
+    codepoints: Vec<u32>,
+) -> Result<crate::pdf_engine::DocFontExtraction> {
+    let out = tokio::task::spawn_blocking(move || {
+        crate::pdf_engine::extract_font_payload_from_bytes(&bytes, &family, &codepoints)
+    })
+    .await
+    .map_err(|e| AppError::Pdf(format!("extract-font-payload task panicked: {e}")))??;
+    Ok(out)
+}
+
+/// Path variant of [`pdf_extract_font_payload`] — heavy (>1 MiB)
+/// documents must not marshal their whole byte buffer through the
+/// JSON-array IPC just to look up one font program (the same
+/// inflation the engine_*_to_path commands exist to avoid).
+#[tauri::command]
+pub async fn pdf_extract_font_payload_from_path(
+    path: String,
+    family: String,
+    codepoints: Vec<u32>,
+) -> Result<crate::pdf_engine::DocFontExtraction> {
+    let out = tokio::task::spawn_blocking(move || {
+        crate::pdf_engine::extract_font_payload_from_path(&path, &family, &codepoints)
+    })
+    .await
+    .map_err(|e| AppError::Pdf(format!("extract-font-payload-path task panicked: {e}")))??;
+    Ok(out)
+}
+
+#[cfg(test)]
+mod wire_shape_tests {
+    use super::*;
+    use crate::pdf_engine::types::WriteSummary;
+    use satchel_core::fallback::FallbackEvent;
+
+    fn summary() -> WriteSummary {
+        WriteSummary {
+            total_bytes: 10,
+            appended_bytes: 2,
+            new_xref_offset: 8,
+            previous_xref_offset: 4,
+            new_objects_emitted: 1,
+        }
+    }
+
+    fn event() -> FallbackEvent {
+        FallbackEvent {
+            area: "font.substituted".into(),
+            detail: "requested='Calibri' used='Helvetica' paragraph=p1".into(),
+        }
+    }
+
+    /// Pins the bytes-command wire shape the frontend reads
+    /// (pdfEngineBake.ts): summary stays NESTED, degradations is an
+    /// additive sibling array of {area, detail}.
+    #[test]
+    fn engine_save_result_wire_shape() {
+        let v = serde_json::to_value(EngineSaveResult {
+            bytes: vec![1, 2],
+            summary: summary(),
+            degradations: vec![event()],
+        })
+        .expect("serializes");
+        assert_eq!(v["summary"]["total_bytes"], 10);
+        assert_eq!(v["summary"]["appended_bytes"], 2);
+        assert_eq!(v["degradations"][0]["area"], "font.substituted");
+        assert!(v["degradations"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("Calibri"));
+    }
+
+    /// Pins the path-command wire shape: WriteSummary fields are
+    /// FLATTENED at the top level (existing frontend readers of
+    /// total_bytes/appended_bytes/... keep working — the pre-Session-1
+    /// shape WAS the bare WriteSummary), with degradations additive.
+    #[test]
+    fn engine_path_save_result_flattens_summary() {
+        let v = serde_json::to_value(EnginePathSaveResult {
+            summary: summary(),
+            degradations: vec![event()],
+        })
+        .expect("serializes");
+        assert_eq!(v["total_bytes"], 10, "summary must be flattened: {v}");
+        assert_eq!(v["appended_bytes"], 2);
+        assert_eq!(v["new_objects_emitted"], 1);
+        assert!(v.get("summary").is_none(), "no nested summary key: {v}");
+        assert_eq!(v["degradations"][0]["area"], "font.substituted");
+    }
+
+    /// Clean runs serialize an EMPTY degradations array (not null /
+    /// absent) so the TS merge layer can rely on the field existing.
+    #[test]
+    fn clean_run_serializes_empty_degradations_array() {
+        let v = serde_json::to_value(EnginePathSaveResult {
+            summary: summary(),
+            degradations: vec![],
+        })
+        .expect("serializes");
+        assert!(v["degradations"].as_array().unwrap().is_empty());
+    }
 }

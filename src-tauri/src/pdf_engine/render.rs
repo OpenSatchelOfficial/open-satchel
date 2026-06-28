@@ -1,16 +1,11 @@
-//! pdfium-backed page renderer.
+//! pdfium-backed page renderer (Session 3).
 //!
-//! Loads the platform pdfium shared library dynamically from one of:
+//! Loads `pdfium.dll` dynamically from one of:
 //!
-//! 1. `$PDFIUM_DYNAMIC_LIB_PATH` — directory containing pdfium.dll
-//!    (or libpdfium.so / libpdfium.dylib on non-Windows). The Tauri
-//!    shell sets this at startup to point at the bundled resource
-//!    dir, so end users get a working binary out of the box;
-//!    developers can override to point at a custom build.
-//! 2. `<repo>/src-tauri/resources/pdfium/` — where
-//!    `scripts/install-pdfium.mjs` drops the library at install time.
-//!    Used as a dev fallback when Rust is invoked directly via
-//!    `cargo run` (no Tauri shell to set the env var).
+//! 1. `$PDFIUM_DYNAMIC_LIB_PATH` — directory containing pdfium.dll (or
+//!    libpdfium.so / libpdfium.dylib on non-Windows).
+//! 2. `<repo>/tools/pdfium/bin/` — the path
+//!    `scripts/install-pdfium.mjs` drops the library into.
 //! 3. System PATH — last resort; behaves like the default
 //!    [`Pdfium::bind_to_system_library`].
 //!
@@ -26,7 +21,8 @@ use crate::error::AppError;
 use crate::Result;
 use pdfium_render::prelude::*;
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // `Pdfium` owns a `Box<dyn PdfiumLibraryBindings>` which is neither
 // Send nor Sync (the bindings trait doesn't require it). That rules
@@ -61,11 +57,9 @@ fn with_pdfium<R>(f: impl FnOnce(&Pdfium) -> Result<R>) -> Result<R> {
                 drop(borrow);
                 let bindings = bind_pdfium().map_err(|e| {
                     AppError::Pdf(format!(
-                        "no pdfium binary found: run \
-                         `node scripts/install-pdfium.mjs`, set \
-                         PDFIUM_DYNAMIC_LIB_PATH to the directory \
-                         containing pdfium, or install pdfium on the \
-                         system library path. probe error: {e}"
+                        "no pdfium binary found: set PDFIUM_DYNAMIC_LIB_PATH, \
+                         run scripts/install-pdfium.mjs, or install pdfium \
+                         on PATH. probe error: {e}"
                     ))
                 })?;
                 *cell.borrow_mut() = Some(Pdfium::new(bindings));
@@ -79,49 +73,129 @@ fn with_pdfium<R>(f: impl FnOnce(&Pdfium) -> Result<R>) -> Result<R> {
     })
 }
 
-/// Find and bind the pdfium shared library. Checks env var, then the
-/// repo-local src-tauri/resources/pdfium dir, then falls back to the
-/// platform system library.
-fn bind_pdfium() -> std::result::Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
-    // 1. Explicit path via env var (set by Tauri shell at startup in
-    //    production; can be overridden by developers).
-    if let Ok(dir) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
-        return Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir));
-    }
+/// Records which discovery branch actually bound pdfium, for
+/// diagnostics + the Session-10 bundle smoke (which asserts a packaged
+/// app binds from the executable directory, NOT from a leaked env var
+/// or the repo `tools/` dir). Set once, on the first successful bind.
+static PDFIUM_SOURCE: OnceLock<String> = OnceLock::new();
 
-    // 2. Repo-local src-tauri/resources/pdfium (dev fallback when
-    //    cargo is invoked directly, without the Tauri shell).
-    if let Some(dir) = find_repo_pdfium_dir() {
-        let path_str = dir.to_string_lossy().to_string();
-        if let Ok(b) =
-            Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&path_str))
-        {
-            return Ok(b);
-        }
-        // Fall through if binding failed — try system library below
-        // as a last resort.
-    }
-
-    // 3. System library on PATH
-    Pdfium::bind_to_system_library()
+fn note_pdfium_source(s: String) {
+    let _ = PDFIUM_SOURCE.set(s);
 }
 
-/// Walk up from `CARGO_MANIFEST_DIR` (or cwd) looking for the
-/// `src-tauri/resources/pdfium` directory. Returns the path if found.
-fn find_repo_pdfium_dir() -> Option<PathBuf> {
+/// The discovery branch that bound pdfium in this process, if a bind
+/// has occurred. One of: `env:PDFIUM_DYNAMIC_LIB_PATH=…`,
+/// `repo-tools:…`, `executable-directory:…`, or `system-library`.
+/// The bundle smoke asserts this starts with `executable-directory`.
+pub fn pdfium_source() -> Option<String> {
+    PDFIUM_SOURCE.get().cloned()
+}
+
+/// Find and bind pdfium.dll / libpdfium. Probe order:
+/// 1. `$PDFIUM_DYNAMIC_LIB_PATH` — explicit override (dev + CI).
+/// 2. repo-local `tools/pdfium/bin/` — the dev fast-path.
+/// 3. **next to the current executable** — the INSTALLED-APP path. The
+///    bundler drops `pdfium.dll` beside the binary (and beside
+///    `pdfium_worker.exe`), so a packaged app with no env var and no
+///    `tools/` dir finds it here. Kept AFTER the two dev paths so dev
+///    behavior is byte-identical; only a packaged app reaches it.
+/// 4. system library on PATH — last resort.
+fn bind_pdfium() -> std::result::Result<Box<dyn PdfiumLibraryBindings>, PdfiumError> {
+    // 1. Explicit path via env var.
+    if let Ok(dir) = std::env::var("PDFIUM_DYNAMIC_LIB_PATH") {
+        let b = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(&dir))?;
+        note_pdfium_source(format!("env:PDFIUM_DYNAMIC_LIB_PATH={dir}"));
+        return Ok(b);
+    }
+
+    // 2. Repo-local tools/pdfium/bin.
+    if let Some(dir) = find_repo_tools_dir() {
+        let candidate = dir.join("bin");
+        if candidate.exists() {
+            if let Some(b) = try_bind_in_dir(&candidate) {
+                note_pdfium_source(format!("repo-tools:{}", candidate.display()));
+                return Ok(b);
+            }
+            // Fall through if binding failed — try the exe dir + system
+            // library below.
+        }
+    }
+
+    // 3. Next to the current executable (packaged-app layout).
+    for dir in exe_sibling_dirs() {
+        if let Some(b) = try_bind_in_dir(&dir) {
+            note_pdfium_source(format!("executable-directory:{}", dir.display()));
+            return Ok(b);
+        }
+    }
+
+    // 4. System library on PATH.
+    let b = Pdfium::bind_to_system_library()?;
+    note_pdfium_source("system-library".to_string());
+    Ok(b)
+}
+
+/// Try to bind the platform pdfium library inside `dir`. Returns `None`
+/// (without attempting a load) when the library file isn't present, so
+/// a probe of an empty directory is cheap and never touches the loader.
+fn try_bind_in_dir(dir: &Path) -> Option<Box<dyn PdfiumLibraryBindings>> {
+    let lib_path = Pdfium::pdfium_platform_library_name_at_path(&dir.to_string_lossy().to_string());
+    if !Path::new(&lib_path).exists() {
+        return None;
+    }
+    Pdfium::bind_to_library(&lib_path).ok()
+}
+
+/// Candidate directories to probe for a pdfium library laid down beside
+/// the executable by the bundler. Covers the packaged layouts:
+/// Windows places the lib next to the exe; a macOS `.app` puts the exe in
+/// `Contents/MacOS/` with libraries in `../Resources` or `../Frameworks`;
+/// Linux AppImage/portable layouts use a sibling `../lib`, while a `.deb`
+/// installs the binary to `<prefix>/bin/<name>` and stages Tauri's bundled
+/// resources to a product-named `<prefix>/lib/<name>/`.
+///
+/// On Linux the PRIMARY shipping vehicle is Flatpak, whose launch wrapper
+/// exports `PDFIUM_DYNAMIC_LIB_PATH` (the highest-priority bind branch) so
+/// it never reaches this probe; these `../lib*` candidates are the
+/// belt-and-suspenders fallback for the secondary deb/AppImage targets.
+/// NOTE (Session 11): the exact deb resource directory is UNVERIFIED on
+/// Linux hardware — confirm `<prefix>/lib/<name>/` on the first real Linux
+/// `tauri build` and adjust this list if the bundler nests differently.
+fn exe_sibling_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+            dirs.push(dir.join("..").join("Resources"));
+            dirs.push(dir.join("..").join("Frameworks"));
+            dirs.push(dir.join("..").join("lib"));
+            // Product-named lib dir: `<prefix>/lib/<exe-stem>/` (the deb
+            // layout). Derived from the exe stem so it tracks the binary
+            // name rather than hardcoding "open-satchel".
+            if let Some(stem) = exe.file_stem() {
+                dirs.push(dir.join("..").join("lib").join(stem));
+            }
+        }
+    }
+    dirs
+}
+
+/// Walk up from `CARGO_MANIFEST_DIR` (or cwd) looking for a
+/// `tools/pdfium` directory. Returns the path to it if found.
+///
+/// NOTE: `CARGO_MANIFEST_DIR` is read at RUNTIME (not the `env!` macro),
+/// so it is unset for a packaged exe — a packaged app never resolves a
+/// repo `tools/` dir through this path. The Session-10 bundle smoke
+/// relies on that (it also clears the var + runs cwd outside the repo).
+fn find_repo_tools_dir() -> Option<PathBuf> {
     let start = std::env::var_os("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())?;
     let mut cur = start.as_path();
     loop {
-        let candidate = cur.join("src-tauri").join("resources").join("pdfium");
+        let candidate = cur.join("tools").join("pdfium");
         if candidate.exists() {
             return Some(candidate);
-        }
-        // Also handle the case where we're already inside src-tauri/.
-        let inner = cur.join("resources").join("pdfium");
-        if inner.exists() {
-            return Some(inner);
         }
         cur = cur.parent()?;
     }
@@ -131,9 +205,9 @@ fn find_repo_pdfium_dir() -> Option<PathBuf> {
 ///
 /// `scale` is applied against the page's natural dimensions in points
 /// (72 dpi). So `scale = 1.5` on a US-Letter page gives a 918×1188
-/// PNG, matching the browser reference-renderer output. This
-/// alignment is deliberate so engine output can be compared
-/// byte-for-byte against reference captures.
+/// PNG, matching what the Playwright fidelity capture emits. This
+/// alignment is deliberate — the Session 4 render-diff harness
+/// compares engine output byte-for-byte against Playwright captures.
 pub fn render_page_to_png(pdf_path: &str, page_index: u16, scale: f32) -> Result<Vec<u8>> {
     if scale <= 0.0 || !scale.is_finite() {
         return Err(AppError::InvalidArgument(format!(
@@ -451,4 +525,61 @@ pub fn list_page_text_objects(pdf_path: &str, page_index: u16) -> Result<Vec<Pag
         }
         Ok(out)
     })
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    //! pdfium-free unit tests for the Session-10 packaged-app discovery
+    //! probe. These never load the library (the CI lib gate runs without
+    //! pdfium present), so they assert only the path-selection logic.
+    use super::*;
+
+    #[test]
+    fn exe_sibling_dirs_includes_the_exe_directory_first() {
+        let dirs = exe_sibling_dirs();
+        // current_exe() resolves in the test runner, so the list is
+        // non-empty and its first entry is the test binary's own dir.
+        assert!(!dirs.is_empty(), "expected at least the exe dir");
+        let exe = std::env::current_exe().expect("current_exe in test");
+        let parent = exe.parent().expect("test exe has a parent");
+        assert_eq!(
+            dirs[0], parent,
+            "the executable's own directory must be probed first"
+        );
+        // The macOS/Linux sibling layouts are appended after it.
+        assert!(dirs.iter().any(|d| d.ends_with("Resources")));
+        assert!(dirs.iter().any(|d| d.ends_with("Frameworks")));
+        assert!(dirs.iter().any(|d| d.ends_with("lib")));
+        // The Linux .deb product-named lib dir (`../lib/<exe-stem>`) is
+        // probed too, so a deb-installed app finds its staged pdfium.
+        let stem = exe.file_stem().expect("test exe has a stem");
+        assert!(
+            dirs.iter().any(|d| d.ends_with(std::path::Path::new("lib").join(stem))),
+            "expected a ../lib/<exe-stem> candidate for the deb layout"
+        );
+    }
+
+    #[test]
+    fn try_bind_in_dir_returns_none_for_a_dir_without_pdfium() {
+        // An empty temp dir has no platform library, so the probe must
+        // short-circuit to None WITHOUT attempting to load anything.
+        let tmp = std::env::temp_dir().join(format!(
+            "os-render-probe-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&tmp);
+        assert!(
+            try_bind_in_dir(&tmp).is_none(),
+            "probing a pdfium-free directory must yield None, not a load attempt"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pdfium_source_is_none_until_a_bind_occurs() {
+        // In a lib-test process that never renders, no source is set.
+        // (If another test in the same binary rendered first, this would
+        // be Some — so we only assert the getter is callable + typed.)
+        let _ = pdfium_source();
+    }
 }

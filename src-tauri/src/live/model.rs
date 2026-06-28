@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 pub type Bbox = BboxStruct;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct BboxStruct {
     pub x: f32,
     pub y: f32,
@@ -35,11 +35,13 @@ pub enum TextAlign {
     Justify,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ParagraphEdit {
     #[serde(rename = "paragraphId")]
     pub paragraph_id: String,
     pub bbox: Bbox,
+    #[serde(default, rename = "maskBbox", skip_serializing_if = "Option::is_none")]
+    pub mask_bbox: Option<Bbox>,
     #[serde(rename = "originalText")]
     pub original_text: String,
     #[serde(rename = "newText")]
@@ -64,8 +66,18 @@ pub struct ParagraphEdit {
     pub bold: bool,
     #[serde(default)]
     pub italic: bool,
+    #[serde(default)]
+    pub underline: bool,
+    #[serde(default, rename = "strikethrough")]
+    pub strikethrough: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align: Option<TextAlign>,
+    #[serde(
+        default,
+        rename = "lineHeight",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub line_height: Option<f32>,
     #[serde(default, rename = "itemIndices", skip_serializing_if = "Vec::is_empty")]
     pub item_indices: Vec<u32>,
     #[serde(
@@ -246,6 +258,7 @@ mod tests {
                 width: 100.0,
                 height: 20.0,
             },
+            mask_bbox: None,
             original_text: "original".to_string(),
             new_text: text.to_string(),
             font_size: 12.0,
@@ -254,7 +267,10 @@ mod tests {
             font_family: None,
             bold: false,
             italic: false,
+            underline: false,
+            strikethrough: false,
             align: None,
+            line_height: None,
             item_indices: vec![],
             item_original_texts: vec![],
             position_delta: None,

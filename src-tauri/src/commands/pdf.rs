@@ -227,6 +227,46 @@ fn font_dirs_for_substitution() -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Bundled, OFL-licensed Noto Sans SC subset (Simplified Chinese).
+/// TrueType/glyf outlines with the cmap table preserved — fontkit on
+/// the frontend uses that cmap to (a) map source codepoints → Noto GIDs
+/// when re-encoding content streams to Identity-H and (b) generate the
+/// /ToUnicode CMap that makes the output text-selectable. Covers ASCII +
+/// the full CJK Unified Ideographs block (U+4E00–9FFF) + CJK punctuation
+/// + fullwidth forms.
+///
+/// Embedded into the binary via include_bytes! rather than shipped as a
+/// Tauri resource so a packaged build binds it with zero resource-path
+/// plumbing (the same reliability lesson the exe-dir pdfium discovery
+/// taught us — KNOWN-LIMITATIONS / Session 10).
+const NOTO_SANS_SC_SUBSET: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/vendor/fonts/NotoSansSC-Subset.ttf"
+));
+
+/// Return a bundled CJK substitute font for PDF/A conversion.
+///
+/// Real-world CJK PDFs routinely reference a Chinese/Japanese/Korean
+/// font by name (STSong-Light, SimSun, …) or as a bare CIDFontType2 with
+/// no embedded FontFile2 — Acrobat renders them with a system CJK font,
+/// but PDF/A §6.3.4 forbids relying on a non-embedded font, so such files
+/// fail conversion today. The PDF/A converter routes any bare CID font it
+/// can recover text from (it carries a /ToUnicode CMap) to this provider,
+/// embeds the returned bytes as an Identity-H CIDFontType2, re-encodes the
+/// content stream to the new GIDs, and generates a /ToUnicode CMap — so
+/// the output is both PDF/A-conformant and text-selectable.
+///
+/// `base_font` is accepted for future per-family routing (Simplified vs
+/// Traditional vs Japanese) but currently always returns the Simplified-
+/// Chinese face — the only CJK font bundled this session. Traditional /
+/// Japanese / Korean and CFF-keyed (FontFile3) sources stay recorded
+/// residuals (KNOWN-LIMITATIONS §4).
+#[tauri::command]
+pub fn pdfa_get_cjk_substitute(base_font: String) -> Result<Vec<u8>> {
+    let _ = base_font; // reserved for SC/TC/JP/KR routing
+    Ok(NOTO_SANS_SC_SUBSET.to_vec())
+}
+
 /// Load the system sRGB ICC profile bytes for embedding in PDF/A
 /// /OutputIntents. Tries platform-typical paths first; falls back
 /// to the bundled resources/ profile if shipped.
@@ -288,4 +328,39 @@ pub fn pdfa_get_srgb_icc() -> Result<Vec<u8>> {
             .collect::<Vec<_>>()
             .join(", ")
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bundled CJK substitute must be a real, parseable TrueType font
+    /// with cmap coverage for common Chinese characters. This is the
+    /// supply-chain gate: if the vendored font is corrupt, missing, or the
+    /// wrong flavour (CFF instead of glyf), CJK PDF/A conversion silently
+    /// regresses. ttf-parser is already a dependency.
+    #[test]
+    fn cjk_substitute_is_a_valid_cjk_truetype_font() {
+        let bytes = pdfa_get_cjk_substitute("STSong-Light".to_string()).expect("provider");
+        assert!(
+            bytes.len() > 100_000,
+            "CJK substitute suspiciously small ({} bytes) — bundled font missing?",
+            bytes.len()
+        );
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("vendored font must parse");
+        // glyf-based (FontFile2), not CFF — PDF/A CIDFontType2 needs TrueType outlines.
+        assert!(
+            face.tables().glyf.is_some(),
+            "bundled CJK font must have glyf outlines (FontFile2-eligible)"
+        );
+        // cmap coverage for representative Hanzi (中文档案机密) + ASCII.
+        for c in ['中', '文', '档', '案', '机', '密', 'A', '0'] {
+            assert!(
+                face.glyph_index(c).is_some(),
+                "bundled CJK font lacks a glyph for U+{:04X} ({})",
+                c as u32,
+                c
+            );
+        }
+    }
 }

@@ -1,8 +1,15 @@
 // Library entry point. Keeping the bulk of the app here (rather than in
 // main.rs) lets us share code with future mobile targets and unit-test the
 // Tauri setup if we want to.
+//
+// Synced from the internal 0.5.0 build: all the new commands (redaction
+// permanence probes, glyph/vector detectors, cert-encrypt, CJK substitute,
+// engine) are registered here; the PUBLIC-only bits — the commercial-license
+// module + the auto-updater (process + updater plugins) + the pdfium
+// resource-dir setup — are preserved.
 
 mod commands;
+pub mod core_io;
 mod error;
 pub mod license;
 pub mod live;
@@ -108,6 +115,7 @@ pub fn run() {
             commands::pdf::pdf_extract_text,
             commands::pdf::pdfa_get_srgb_icc,
             commands::pdf::pdfa_get_standard14_substitute,
+            commands::pdf::pdfa_get_cjk_substitute,
             // --- font subsystem (M2) ---
             commands::font::font_list_system,
             commands::font::font_get_bytes,
@@ -116,6 +124,7 @@ pub fn run() {
             commands::font::font_imported_remove,
             commands::font::font_scan_pdf,
             commands::font::font_subset,
+            commands::font::font_coverage,
             // --- tsa / ocsp http proxy ---
             // Routes zgapdfsigner's TSA + OCSP requests through native
             // reqwest so WebView2 CORS doesn't block them. See
@@ -161,6 +170,7 @@ pub fn run() {
             commands::engine::engine_prefetch_pages,
             commands::engine::engine_render_pages_concurrent,
             commands::cert_encrypt::pdf_encrypt_to_certs,
+            commands::cert_encrypt::cms_wrap_recipient,
             commands::engine::engine_page_count,
             commands::engine::engine_probe_linearization,
             commands::engine::engine_bake,
@@ -173,7 +183,9 @@ pub fn run() {
             commands::engine::engine_render_page_with_skips_from_bytes,
             commands::engine::engine_extract_page_fonts,
             commands::engine::engine_extract_page_fonts_from_bytes,
-            // --- PDF structural inspection helpers ---
+            commands::engine::pdf_extract_font_payload,
+            commands::engine::pdf_extract_font_payload_from_path,
+            // --- PDF structural verification (ribbon-test driver) ---
             commands::verify::pdf_verify_annotation,
             commands::verify::pdf_verify_acroform,
             commands::verify::pdf_verify_encryption,
@@ -183,8 +195,9 @@ pub fn run() {
             commands::verify::pdf_verify_xobject_count,
             commands::verify::pdf_verify_ocgs,
             commands::verify::pdf_verify_watermark_text,
-            // New (this session) — page manipulation + structural verifiers.
+            // New — page manipulation + structural verifiers.
             commands::verify::pdf_verify_page_count,
+            commands::verify::pdf_open_health,
             commands::verify::pdf_verify_page_order,
             commands::verify::pdf_verify_page_labels,
             commands::verify::pdf_resolve_page_labels,
@@ -194,9 +207,13 @@ pub fn run() {
             commands::verify::pdf_verify_xobject_replaced,
             commands::verify::pdf_decrypt_bytes,
             commands::verify::pdf_remove_watermark_text,
+            commands::verify::pdf_probe_redaction_overlaps,
+            commands::verify::pdf_probe_glyph_procedures,
+            commands::verify::pdf_probe_region_fill,
             commands::verify::pdf_strip_text_in_bboxes,
             commands::verify::pdf_strip_text_in_bboxes_to_path,
             commands::verify::pdf_grep_full_file,
+            commands::verify::pdf_redaction_permanence_check,
             // --- commercial license verification ---
             // Offline Ed25519 JWT check. Edition label only — no
             // feature gating anywhere in the codebase.
@@ -236,15 +253,10 @@ pub fn run() {
             // (so expired licenses don't leak through across restarts).
             license::load_on_startup(app.handle());
 
-            // Point pdfium at the bundled resource dir so end users
-            // get a working binary out of the box. Developers can
-            // override PDFIUM_DYNAMIC_LIB_PATH before launch to point
-            // at a custom pdfium build. See
-            // src-tauri/src/pdf_engine/render.rs for the lookup order.
-            //
-            // Both the in-process renderer and the spawned
-            // pdfium_worker children inherit this env var, so the
-            // multi-process render pool also picks it up.
+            // Point pdfium at the bundled resource dir so end users get a
+            // working binary out of the box. Developers can override
+            // PDFIUM_DYNAMIC_LIB_PATH before launch. The synced render.rs
+            // also probes the exe dir, so this is belt-and-suspenders.
             if std::env::var_os("PDFIUM_DYNAMIC_LIB_PATH").is_none() {
                 if let Ok(resource_dir) = app.path().resource_dir() {
                     let candidate = resource_dir.join("resources").join("pdfium");

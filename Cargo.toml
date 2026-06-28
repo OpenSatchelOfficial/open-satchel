@@ -1,0 +1,21 @@
+# Workspace root — ties the shipping Tauri app (src-tauri) to the
+# UI-independent document core (crates/satchel-core). Synced from the
+# internal build to bring the 0.5.0 feature set (the engine + crypto +
+# the fallback/degradation channel depend on satchel-core).
+#
+# Profiles are only honored at the workspace root — cargo silently
+# ignores profile sections in member manifests.
+
+[workspace]
+resolver = "2"
+members = [
+    "src-tauri",
+    "crates/satchel-core",
+]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

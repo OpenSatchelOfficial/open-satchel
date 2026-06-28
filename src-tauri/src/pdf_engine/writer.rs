@@ -1120,14 +1120,15 @@ fn emit_embedded_font_chain(
         format!("AAAAAA+{}", payload.postscript_name)
     };
 
-    // Reserve four object numbers up front.
+    // Reserve five object numbers up front.
     let fontfile_num = *next_new_id;
     let descriptor_num = *next_new_id + 1;
     let cidfont_num = *next_new_id + 2;
     let type0_num = *next_new_id + 3;
-    *next_new_id += 4;
+    let tounicode_num = *next_new_id + 4;
+    *next_new_id += 5;
 
-    let mut emitted = Vec::with_capacity(4);
+    let mut emitted = Vec::with_capacity(5);
 
     // ── 1. /FontFile2 stream (compressed TTF bytes) ──────────────
     let length1 = payload.bytes.len();
@@ -1229,8 +1230,9 @@ fn emit_embedded_font_chain(
              << /Type /Font /Subtype /Type0 \
              /BaseFont /{} \
              /Encoding /Identity-H \
-             /DescendantFonts [{} 0 R] >>\nendobj\n",
-            type0_num, basefont, cidfont_num,
+             /DescendantFonts [{} 0 R] \
+             /ToUnicode {} 0 R >>\nendobj\n",
+            type0_num, basefont, cidfont_num, tounicode_num,
         )
         .as_bytes(),
     );
@@ -1240,7 +1242,85 @@ fn emit_embedded_font_chain(
         offset: type0_offset,
     });
 
+    // ── 5. /ToUnicode CMap (Session 4) ────────────────────────────
+    // Without this, text drawn through the embedded chain RENDERS but
+    // is invisible to extraction, search, and copy-paste: Identity-H
+    // CIDs are raw glyph indices, and a reader with no ToUnicode CMap
+    // can only guess. The pre-Session-4 G2 driver never noticed —
+    // it grepped saved bytes for hex CIDs instead of re-extracting.
+    // CID == GID under /CIDToGIDMap /Identity, so reversing the TTF's
+    // own cmap (gid → unicode, first mapping wins) is exact.
+    let tounicode_offset = out.len();
+    let cmap_text = build_tounicode_cmap(&face);
+    emit_flate_stream_object(out, tounicode_num, cmap_text.as_bytes())?;
+    emitted.push(EmittedObject {
+        obj_num: tounicode_num,
+        generation: 0,
+        offset: tounicode_offset,
+    });
+
     Ok(((type0_num, 0), emitted))
+}
+
+/// Build the ToUnicode CMap text for an embedded TrueType face whose
+/// text is emitted as Identity-H CIDs (CID == glyph index). Walks the
+/// face's unicode cmap subtables and inverts them: gid → codepoint,
+/// first mapping wins (multiple codepoints can map to one glyph —
+/// e.g. 'A' and U+0391 GREEK ALPHA sharing an outline; the first is
+/// as good a representative as any). Codepoints above the BMP are
+/// emitted as UTF-16BE surrogate pairs per the bfchar spec.
+fn build_tounicode_cmap(face: &ttf_parser::Face) -> String {
+    let mut gid_to_cp: std::collections::BTreeMap<u16, u32> = std::collections::BTreeMap::new();
+    if let Some(cmap) = face.tables().cmap {
+        for subtable in cmap.subtables {
+            if !subtable.is_unicode() {
+                continue;
+            }
+            subtable.codepoints(|cp| {
+                if let Some(c) = char::from_u32(cp) {
+                    if let Some(gid) = subtable.glyph_index(cp) {
+                        gid_to_cp.entry(gid.0).or_insert(c as u32);
+                    }
+                }
+            });
+        }
+    }
+
+    let mut cmap_text = String::with_capacity(gid_to_cp.len() * 24 + 320);
+    cmap_text.push_str(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\n\
+         begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         /CMapType 2 def\n\
+         1 begincodespacerange\n\
+         <0000> <FFFF>\n\
+         endcodespacerange\n",
+    );
+    // bfchar sections are capped at 100 entries per the CMap spec.
+    let entries: Vec<(u16, u32)> = gid_to_cp.into_iter().collect();
+    for chunk in entries.chunks(100) {
+        cmap_text.push_str(&format!("{} beginbfchar\n", chunk.len()));
+        for (gid, cp) in chunk {
+            let mut utf16 = String::new();
+            if let Some(c) = char::from_u32(*cp) {
+                let mut buf = [0u16; 2];
+                for unit in c.encode_utf16(&mut buf) {
+                    utf16.push_str(&format!("{:04X}", unit));
+                }
+            }
+            cmap_text.push_str(&format!("<{:04X}> <{}>\n", gid, utf16));
+        }
+        cmap_text.push_str("endbfchar\n");
+    }
+    cmap_text.push_str(
+        "endcmap\n\
+         CMapName currentdict /CMap defineresource pop\n\
+         end\n\
+         end\n",
+    );
+    cmap_text
 }
 
 /// Produce a copy of `page_dict` with the given `font_name -> font_ref`
@@ -1917,7 +1997,7 @@ startxref\n30\n%%EOF\n";
     }
 
     #[test]
-    fn embedded_font_chain_emits_four_objects() {
+    fn embedded_font_chain_emits_five_objects() {
         let ttf = load_test_ttf();
         let payload = EmbeddedFontPayload {
             bytes: ttf,
@@ -1929,14 +2009,61 @@ startxref\n30\n%%EOF\n";
         let mut next_id: u32 = 100;
         let ((type0_num, type0_gen), emitted) =
             emit_embedded_font_chain(&mut buf, &mut next_id, &payload).expect("emit succeeds");
-        assert_eq!(emitted.len(), 4, "FontFile2 + Descriptor + CIDFont + Type0");
+        assert_eq!(
+            emitted.len(),
+            5,
+            "FontFile2 + Descriptor + CIDFont + Type0 + ToUnicode"
+        );
         assert_eq!(type0_gen, 0);
-        // Type0 is the LAST of the four (most-recent obj_num).
+        // Type0 stays the FOURTH object; ToUnicode trails it (Session 4).
         assert_eq!(type0_num, 103);
-        assert_eq!(next_id, 104, "next_id advances by exactly 4");
-        // All four obj_nums are sequential.
+        assert_eq!(next_id, 105, "next_id advances by exactly 5");
         let nums: Vec<u32> = emitted.iter().map(|e| e.obj_num).collect();
-        assert_eq!(nums, vec![100, 101, 102, 103]);
+        assert_eq!(nums, vec![100, 101, 102, 103, 104]);
+    }
+
+    #[test]
+    fn embedded_font_type0_carries_tounicode_cmap() {
+        // Session 4: without /ToUnicode, text drawn through the
+        // embedded chain renders but is INVISIBLE to extraction /
+        // search / copy-paste (Identity-H CIDs are raw glyph
+        // indices). The CMap must exist, be referenced from the
+        // Type0 dict, and map the glyphs for common ASCII back to
+        // their codepoints.
+        let ttf = load_test_ttf();
+        let face = ttf_parser::Face::parse(&ttf, 0).expect("fixture parses");
+        let gid_a = face.glyph_index('A').expect("NotoSans has A").0;
+        let payload = EmbeddedFontPayload {
+            bytes: ttf.clone(),
+            postscript_name: "NotoSans-Regular".into(),
+            bold: false,
+            italic: false,
+        };
+        let mut buf = Vec::new();
+        let mut next_id: u32 = 10;
+        let _ = emit_embedded_font_chain(&mut buf, &mut next_id, &payload).unwrap();
+        let s = String::from_utf8_lossy(&buf);
+        assert!(
+            s.contains("/ToUnicode 14 0 R"),
+            "Type0 dict must reference the ToUnicode object: {s}"
+        );
+
+        // The CMap text itself (built before compression) must carry
+        // the bfchar mapping gid('A') -> U+0041.
+        let cmap = build_tounicode_cmap(&face);
+        assert!(cmap.contains("begincmap") && cmap.contains("endbfchar"));
+        assert!(
+            cmap.contains(&format!("<{:04X}> <0041>", gid_a)),
+            "cmap must map gid {gid_a:04X} back to U+0041:\n{}",
+            &cmap[..cmap.len().min(600)]
+        );
+        // bfchar block sizes respect the 100-entry spec cap.
+        for line in cmap.lines() {
+            if let Some(n) = line.strip_suffix(" beginbfchar") {
+                let n: usize = n.trim().parse().expect("bfchar count parses");
+                assert!(n >= 1 && n <= 100, "bfchar block size {n} out of spec");
+            }
+        }
     }
 
     #[test]

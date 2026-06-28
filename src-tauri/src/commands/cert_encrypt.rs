@@ -1,22 +1,19 @@
 //! Public-key (cert-based) PDF encryption.
 //!
-//! Given cleartext PDF bytes + a list of CMS EnvelopedData blobs
-//! built on the JS side via node-forge + the FEK that those
-//! envelopes wrap, walk every indirect object and AES-256-CBC
-//! encrypt strings + streams under the FEK. Install a /Encrypt
-//! dict declaring /Filter /Adobe.PubSec /V 5 with the recipients
-//! array on the /DefaultCryptFilter — Adobe Reader recognises
-//! this as V=5 cert encryption and decrypts via any installed
-//! cert whose private key matches one of the envelopes.
+//! NATIVE since 2026-06-11 (Night-2 decision #3): the shell owns the
+//! WHOLE pipeline — seed + FEK generation, CMS EnvelopedData
+//! construction per recipient cert (satchel-core RustCrypto, where
+//! node-forge used to do it JS-side), object walking, AES-256-CBC
+//! body encryption, /Encrypt dict installation. Secret material
+//! (seed, FEK) never crosses the IPC boundary anymore.
 //!
 //! Reference: ISO 32000-2 §7.6.5 (public-key security handlers)
 //! + Adobe Supplement to ISO 32000 (V=5 layout).
 //!
 //! V=5 doesn't do per-object key derivation — the FEK is used
-//! directly with a per-object random IV. Caller must pass a
-//! 32-byte FEK that matches what the recipient envelopes wrap;
-//! the JS side derives FEK = SHA-256(seed) where `seed` is the
-//! 20-byte payload prefix in each envelope.
+//! directly with a per-object random IV. FEK = SHA-256(seed) where
+//! `seed` is the 20-byte payload prefix wrapped in each recipient
+//! envelope; payload = seed || /P (little-endian i32).
 
 use crate::error::AppError;
 use crate::Result;
@@ -25,33 +22,94 @@ use cbc::Encryptor;
 use cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use lopdf::{Dictionary, Document, Object, ObjectId};
 use rand::RngCore;
+use satchel_core::crypto::cms_envelope;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::Cursor;
 
-/// Tauri command — JS-side passes the cleartext PDF bytes + the
-/// CMS EnvelopedData blobs (built via node-forge) + the FEK they
-/// wrap + permission flags. Returns the encrypted PDF bytes.
+/// Tauri command — the native end-to-end path. JS passes cleartext
+/// PDF bytes + recipient certificate PEMs + permission flags;
+/// everything secret is generated and consumed on this side.
 #[tauri::command]
 pub async fn pdf_encrypt_to_certs(
     bytes: Vec<u8>,
-    recipient_envelopes: Vec<Vec<u8>>,
-    fek: Vec<u8>,
+    recipient_certs_pem: Vec<String>,
     permissions: i32,
 ) -> Result<Vec<u8>> {
     tokio::task::spawn_blocking(move || {
-        encrypt_pdf_to_certs(&bytes, &recipient_envelopes, &fek, permissions)
+        encrypt_pdf_to_certs_native(&bytes, &recipient_certs_pem, permissions)
     })
     .await
     .map_err(|e| AppError::Pdf(format!("pdf_encrypt_to_certs task: {e}")))?
 }
 
+/// Tauri command — envelope primitive for tests/tooling: wrap an
+/// explicit payload for one recipient cert via the native CMS
+/// builder. Exposed so the `pdf_build_cert_envelope` test hook
+/// exercises the production envelope code, not a JS shadow.
+#[tauri::command]
+pub fn cms_wrap_recipient(payload: Vec<u8>, cert_pem: String) -> Result<Vec<u8>> {
+    cms_envelope::wrap_payload_for_recipient(&payload, &cert_pem)
+        .map_err(|e| AppError::Pdf(format!("cms wrap: {e}")))
+}
+
+/// Native pipeline: generate seed → build per-recipient CMS
+/// envelopes (RustCrypto) → derive FEK → encrypt the document body.
+pub fn encrypt_pdf_to_certs_native(
+    bytes: &[u8],
+    recipient_certs_pem: &[String],
+    permissions: i32,
+) -> Result<Vec<u8>> {
+    if recipient_certs_pem.is_empty() {
+        return Err(AppError::Pdf(
+            "cert-encrypt: at least one recipient certificate required".into(),
+        ));
+    }
+
+    // 20-byte random seed; payload = seed || /P little-endian.
+    let mut seed = [0u8; 20];
+    rand::thread_rng().fill_bytes(&mut seed);
+    let payload = recipient_payload(&seed, permissions);
+
+    let envelopes: Vec<Vec<u8>> = recipient_certs_pem
+        .iter()
+        .map(|pem| {
+            cms_envelope::wrap_payload_for_recipient(&payload, pem)
+                .map_err(|e| AppError::Pdf(format!("cert-encrypt: envelope: {e}")))
+        })
+        .collect::<Result<_>>()?;
+
+    let fek = derive_fek(&seed);
+    encrypt_pdf_to_certs(bytes, &envelopes, &fek, permissions)
+}
+
+/// 24-byte recipient payload: 20-byte seed || 4-byte /P
+/// (little-endian signed) — the layout Adobe writes and the old JS
+/// `buildRecipientPayload` produced.
+fn recipient_payload(seed: &[u8; 20], permissions: i32) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(24);
+    payload.extend_from_slice(seed);
+    payload.extend_from_slice(&permissions.to_le_bytes());
+    payload
+}
+
+/// FEK = SHA-256(seed) per the Adobe V=5 supplement (single
+/// recipient class) — matches the old JS `deriveFekFromSeeds`.
+fn derive_fek(seed: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(seed);
+    hasher.finalize().to_vec()
+}
+
 type Aes256CbcEnc = Encryptor<Aes256>;
 
-/// Encrypt a cleartext PDF for cert-based delivery.
+/// Encrypt a cleartext PDF for cert-based delivery (body-encryption
+/// half — callers normally go through [`encrypt_pdf_to_certs_native`]
+/// which also builds the envelopes and derives the FEK).
 ///
 /// `bytes`             — cleartext input PDF.
-/// `recipient_envelopes` — DER-encoded CMS EnvelopedData per recipient.
-///                          Built JS-side via node-forge.
+/// `recipient_envelopes` — DER-encoded CMS EnvelopedData per recipient
+///                          (satchel-core RustCrypto builder).
 /// `fek`                — 32-byte file encryption key. Must match what
 ///                          the envelopes wrap.
 /// `permissions`        — PDF /P signed-int permission flags.
@@ -305,6 +363,92 @@ mod tests {
         );
         assert!(s.contains("/adbe.pkcs7.s5"), "/SubFilter missing");
         assert!(s.contains("/AESV3"), "/AESV3 cipher mode missing");
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../crates/satchel-core/tests/fixtures/cms")
+            .join(name)
+    }
+
+    /// The full native pipeline, decrypt-verified end-to-end: encrypt
+    /// a doc for the committed test cert, then play PDF viewer — pull
+    /// the /Recipients envelope out of the OUTPUT FILE, unwrap it
+    /// with the recipient's private key, derive the FEK from the
+    /// recovered seed, and AES-decrypt the page content stream back
+    /// to the original bytes. No half passes here: if any stage
+    /// (envelope, payload layout, FEK derivation, body encryption)
+    /// drifted, the final equality would fail.
+    #[test]
+    fn native_encrypt_round_trips_via_recipient_key() {
+        let cert_pem = std::fs::read_to_string(fixture("test-only-recipient-cert.pem")).unwrap();
+        let key_pem = std::fs::read_to_string(fixture("test-only-recipient-key.pem")).unwrap();
+
+        let clear = tiny_pdf();
+        let out =
+            encrypt_pdf_to_certs_native(&clear, &[cert_pem], -4).expect("native encrypt");
+
+        // Parse the OUTPUT and walk it like a viewer would.
+        let doc = Document::load_mem(&out).expect("output parses");
+        let enc_ref = doc.trailer.get(b"Encrypt").expect("/Encrypt present");
+        let enc = match enc_ref {
+            Object::Reference(r) => doc.get_object(*r).unwrap().as_dict().unwrap(),
+            Object::Dictionary(d) => d,
+            other => panic!("unexpected /Encrypt shape: {other:?}"),
+        };
+        assert_eq!(enc.get(b"Filter").unwrap().as_name().unwrap(), b"Adobe.PubSec");
+        assert_eq!(enc.get(b"V").unwrap().as_i64().unwrap(), 5);
+        let cf = enc.get(b"CF").unwrap().as_dict().unwrap();
+        let default_cf = cf.get(b"DefaultCryptFilter").unwrap().as_dict().unwrap();
+        let recipients = default_cf.get(b"Recipients").unwrap().as_array().unwrap();
+        assert_eq!(recipients.len(), 1, "one recipient envelope");
+        let envelope = recipients[0].as_str().unwrap();
+
+        // Recipient side: unwrap with the private key (zero
+        // fallbacks — our own envelope is strict DER).
+        let payload = satchel_core::fallback::assert_no_fallbacks("native envelope", || {
+            cms_envelope::unwrap_payload_for_recipient(envelope, &key_pem).expect("unwrap")
+        });
+        assert_eq!(payload.len(), 24, "seed20 || P4");
+        assert_eq!(
+            i32::from_le_bytes(payload[20..24].try_into().unwrap()),
+            -4,
+            "/P round-trips little-endian"
+        );
+        let fek = derive_fek(&payload[..20]);
+
+        // Decrypt the page content stream with the recovered FEK.
+        let pages = doc.get_pages();
+        let (_, page_id) = pages.iter().next().expect("one page");
+        let page = doc.get_object(*page_id).unwrap().as_dict().unwrap();
+        let contents_id = match page.get(b"Contents").unwrap() {
+            Object::Reference(r) => *r,
+            other => panic!("unexpected /Contents shape: {other:?}"),
+        };
+        let stream = doc.get_object(contents_id).unwrap().as_stream().unwrap();
+        let ct = &stream.content;
+        assert!(ct.len() > 16, "IV + at least one block");
+        use cbc::Decryptor;
+        use cipher::BlockDecryptMut;
+        let dec =
+            Decryptor::<Aes256>::new_from_slices(&fek, &ct[..16]).expect("cipher init");
+        let mut buf = ct[16..].to_vec();
+        let plain = dec
+            .decrypt_padded_mut::<Pkcs7>(&mut buf)
+            .expect("content stream decrypts under recovered FEK");
+        assert_eq!(plain, b"q 1 0 0 rg Q", "original content stream recovered");
+    }
+
+    #[test]
+    fn native_rejects_empty_recipients() {
+        let r = encrypt_pdf_to_certs_native(&tiny_pdf(), &[], -4);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn native_rejects_garbage_cert() {
+        let r = encrypt_pdf_to_certs_native(&tiny_pdf(), &["not a pem".to_string()], -4);
+        assert!(r.is_err());
     }
 
     #[test]

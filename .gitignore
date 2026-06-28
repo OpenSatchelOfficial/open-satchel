@@ -17,6 +17,10 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Rust / Tauri
+# Workspace target dir lives at the repo root since the satchel-core
+# workspace split (synced from internal 0.5.0); the src-tauri/target
+# line stays so a stale single-crate target dir is still ignored.
+/target
 src-tauri/target
 src-tauri/gen
 

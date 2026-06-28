@@ -1,0 +1,37 @@
+# Mechanical enforcement of discipline rule 2 (IO behind traits):
+# nothing in satchel-core touches the filesystem directly. Desktop
+# shells implement DocumentSource/DocumentSink over std::fs; WASM
+# shells over the File API; servers over streams. The core never
+# knows which.
+#
+# clippy::disallowed_methods / disallowed_types are warn-by-default
+# lints that only fire when configured here; scripts/core-gates.mjs
+# runs clippy with -D warnings so any hit fails the gate.
+
+disallowed-types = [
+    { path = "std::fs::File", reason = "core IO goes through DocumentSource/DocumentSink traits (NATIVE-REWRITE-PLAN §2.2)" },
+    { path = "std::fs::OpenOptions", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::DirBuilder", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::ReadDir", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::DirEntry", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+]
+
+disallowed-methods = [
+    { path = "std::fs::read", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::read_to_string", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::write", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::copy", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::rename", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::remove_file", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::remove_dir", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::remove_dir_all", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::create_dir", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::create_dir_all", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::read_dir", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::metadata", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::symlink_metadata", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::canonicalize", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::read_link", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::hard_link", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+    { path = "std::fs::set_permissions", reason = "core IO goes through DocumentSource/DocumentSink traits" },
+]

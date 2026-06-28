@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3c22f9cfb75e77948a5f8ce79e5a6f46cdfcda96ccaae82410e1413d46d61e8e # shrinks to initial = EditModel { source_hash: "", pages: {2: PageEdits { paragraphs: [ParagraphEdit { paragraph_id: "p3", bbox: Bbox { x: 0.0, y: 2.0, width: 30.0, height: 10.0 }, mask_bbox: None, original_text: "orig", new_text: "", font_size: 11.0, color: None, background_color: None, font_family: None, bold: false, italic: false, underline: false, strikethrough: false, align: None, line_height: None, item_indices: [], item_original_texts: [], position_delta: None, custom_font_id: None }, ParagraphEdit { paragraph_id: "p1", bbox: Bbox { x: 0.0, y: 2.0, width: 30.0, height: 10.0 }, mask_bbox: None, original_text: "orig", new_text: "", font_size: 11.0, color: None, background_color: None, font_family: None, bold: false, italic: false, underline: false, strikethrough: false, align: None, line_height: None, item_indices: [], item_original_texts: [], position_delta: None, custom_font_id: None }] }}, version: 0, embedded_fonts: {} }, ops = [DropEdit { page: 2, paragraph_id: "p3" }]

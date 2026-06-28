@@ -352,6 +352,26 @@ pub fn font_subset(bytes: Vec<u8>, codepoints: Vec<u32>) -> Result<Vec<u8>> {
     Ok(subset.to_vec())
 }
 
+/// Session 4: which of `codepoints` does this font have NO glyph for?
+/// The save-time escalation path (unicode chars outside WinAnsi route
+/// to an embedded system font) must check coverage BEFORE embedding —
+/// a font that silently lacks the glyph would re-create the exact
+/// char-drop the escalation exists to prevent. Cheap: one ttf-parser
+/// parse + cmap lookups.
+#[tauri::command]
+pub fn font_coverage(bytes: Vec<u8>, codepoints: Vec<u32>) -> Result<Vec<u32>> {
+    let face = ttf_parser::Face::parse(&bytes, 0)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("ttf-parser: {e}")))?;
+    Ok(codepoints
+        .into_iter()
+        .filter(|cp| {
+            char::from_u32(*cp)
+                .and_then(|c| face.glyph_index(c))
+                .is_none()
+        })
+        .collect())
+}
+
 /// Parse a PDF's Font dictionaries and return metadata for each embedded
 /// font. We don't load pdf-lib-equivalent heavy machinery here — this is a
 /// byte-level scan looking for "/Type /Font" dicts and pulling their
@@ -495,6 +515,45 @@ mod tests {
         assert!(
             reparsed.is_ok(),
             "subsetted Arabic font must re-parse cleanly"
+        );
+    }
+
+    /// Session 4 DOCUMENTED LIMITATION (found live by the rewritten
+    /// strict smoke): the Typst subsetter DROPS the cmap table — it
+    /// was built for Typst's PDF writer, which maps text→glyphs from
+    /// the ORIGINAL font and never consults the subset's cmap. OUR
+    /// engine bake encodes through the payload's own cmap
+    /// (encode_cids → face.glyph_index), so a font_subset output is
+    /// unusable as an engine payload: every glyph is unmappable,
+    /// ensure_replacement_text_encodable refuses, and the save
+    /// degrades to pd-lib. The pre-Session-4 G2 path could therefore
+    /// NEVER actually bake an embedded font live — full-font unit
+    /// tests and the fallback-tolerant G2 driver hid it.
+    ///
+    /// The shipping mitigation lives in subsetAndPack
+    /// (pdfEngineBake.ts): post-subset font_coverage check → full-font
+    /// embed + font.subset_failed_full_embed (info) when mappings are
+    /// lost. WHEN THIS TEST STARTS FAILING (a future subsetter keeps
+    /// cmap), remove the TS full-embed fallback and flip this pin.
+    #[test]
+    fn subset_loses_cmap_documented_limitation() {
+        let fontpath = repo_root()
+            .join("scripts")
+            .join("fonts")
+            .join("NotoSans-Regular.ttf");
+        if !fontpath.exists() {
+            eprintln!("skipping: NotoSans not present");
+            return;
+        }
+        let bytes = fs::read(&fontpath).expect("read font");
+        let text = "Hello subset";
+        let codepoints: Vec<u32> = text.chars().map(|c| c as u32).collect();
+        let subset = font_subset(bytes, codepoints.clone()).expect("subset");
+        let missing = font_coverage(subset, codepoints).expect("coverage check");
+        assert!(
+            !missing.is_empty(),
+            "font_subset now PRESERVES cmap — remove the full-embed fallback in \
+             subsetAndPack (pdfEngineBake.ts) and flip this pin"
         );
     }
 

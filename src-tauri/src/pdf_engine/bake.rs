@@ -64,6 +64,7 @@ use crate::pdf_engine::types::{EmbeddedFontPayload, IncrementalPatch, WriteSumma
 use crate::pdf_engine::writer::write_incremental;
 use crate::Result;
 use lopdf::{Document, Object, ObjectId};
+use satchel_core::fallback::record;
 use std::collections::HashMap;
 use std::io::Cursor;
 
@@ -107,8 +108,19 @@ pub fn bake_edit_model(
     // lopdf failures (signed PDFs with xref streams — see S7.5)
     // degrade gracefully: we still bake, just with the bboxes
     // taken as PDF-space (the pre-P3 behavior) so tests and any
-    // caller that already converts keep working.
-    let page_heights = read_page_heights(original_bytes).ok();
+    // caller that already converts keep working. The consequence
+    // for frontend callers (CSS-space bboxes) is misplaced edits —
+    // recorded as a degradation, severity fidelity.
+    let page_heights = match read_page_heights(original_bytes) {
+        Ok(heights) => Some(heights),
+        Err(e) => {
+            record(
+                "geometry.page_height_unavailable",
+                format!("page-height parse failed; bboxes used as PDF-space without conversion: {e}"),
+            );
+            None
+        }
+    };
 
     let mut patches: Vec<IncrementalPatch> = Vec::with_capacity(page_indices.len());
     for page_idx in page_indices {
@@ -138,7 +150,7 @@ pub fn bake_edit_model(
         let font_assignments =
             assign_font_resources_with_embedded(&converted, &model.embedded_fonts);
 
-        let overlay_stream = build_overlay_stream_v2(&converted, &font_assignments);
+        let overlay_stream = build_overlay_stream_v2(&converted, &font_assignments)?;
 
         // Convert font_assignments → writer-side maps.
         let mut inject_standard14_fonts: HashMap<String, String> = HashMap::new();
@@ -179,6 +191,9 @@ fn convert_edit_bbox_to_pdf_space(edit: &ParagraphEdit, page_height: Option<f32>
         Some(h) => {
             let mut out = edit.clone();
             out.bbox.y = h - (edit.bbox.y + edit.bbox.height);
+            if let Some(mask_bbox) = out.mask_bbox.as_mut() {
+                mask_bbox.y = h - (mask_bbox.y + mask_bbox.height);
+            }
             out
         }
         None => edit.clone(),
@@ -195,9 +210,35 @@ fn read_page_heights(original_bytes: &[u8]) -> Result<Vec<f32>> {
         .map_err(|e| AppError::Pdf(format!("parse for page heights: {e}")))?;
     let pages = doc.get_pages();
     let mut heights = Vec::with_capacity(pages.len());
-    for (_num, page_id) in pages.iter() {
-        let h = media_box_height(&doc, *page_id).unwrap_or(792.0);
+    // Aggregate to ONE event (verifier finding): per-page records on a
+    // malformed 500-page doc would bloat the report by 500 entries per
+    // engine invocation.
+    let mut defaulted_pages: Vec<u32> = Vec::new();
+    for (num, page_id) in pages.iter() {
+        let h = match media_box_height(&doc, *page_id) {
+            Some(h) => h,
+            None => {
+                defaulted_pages.push(*num);
+                792.0
+            }
+        };
         heights.push(h);
+    }
+    if !defaulted_pages.is_empty() {
+        let shown: Vec<String> = defaulted_pages
+            .iter()
+            .take(8)
+            .map(|n| n.to_string())
+            .collect();
+        let suffix = if defaulted_pages.len() > 8 { ", …" } else { "" };
+        record(
+            "geometry.media_box_default",
+            format!(
+                "{} page(s) with missing/unreadable MediaBox (pages {}{suffix}); defaulting height to 792pt (US Letter)",
+                defaulted_pages.len(),
+                shown.join(", ")
+            ),
+        );
     }
     Ok(heights)
 }
@@ -211,11 +252,20 @@ fn media_box_height(doc: &Document, page_id: ObjectId) -> Option<f32> {
     for _ in 0..16 {
         let dict = doc.get_dictionary(cur).ok()?;
         if let Ok(mb) = dict.get(b"MediaBox") {
+            // MediaBox may be an INDIRECT REFERENCE — pdfium's writer
+            // emits it that way after content regeneration (the G9
+            // strip's output), which made every overlay bake on
+            // stripped bytes fall to the 792pt default and visually
+            // LOSE edited text on non-Letter pages (Session-1 A4
+            // visual check). Resolve refs at both the value and the
+            // element level, and accept Integer entries (as_f32 is
+            // Real-only in lopdf).
+            let mb = deref_object(doc, mb);
             if let Ok(arr) = mb.as_array() {
                 // MediaBox = [x0 y0 x1 y1]. Height = y1 - y0.
                 if arr.len() >= 4 {
-                    let y0 = arr[1].as_f32().ok()?;
-                    let y1 = arr[3].as_f32().ok()?;
+                    let y0 = object_to_f32(doc, &arr[1])?;
+                    let y1 = object_to_f32(doc, &arr[3])?;
                     return Some(y1 - y0);
                 }
             }
@@ -226,6 +276,25 @@ fn media_box_height(doc: &Document, page_id: ObjectId) -> Option<f32> {
         }
     }
     None
+}
+
+/// Follow a single level of indirection. Returns the input unchanged
+/// for direct objects or dangling references.
+fn deref_object<'a>(doc: &'a Document, obj: &'a Object) -> &'a Object {
+    match obj {
+        Object::Reference(id) => doc.get_object(*id).unwrap_or(obj),
+        other => other,
+    }
+}
+
+/// Numeric coercion that survives both Integer and Real entries plus
+/// one level of indirection — PDF writers disagree on all three.
+fn object_to_f32(doc: &Document, obj: &Object) -> Option<f32> {
+    match deref_object(doc, obj) {
+        Object::Integer(v) => Some(*v as f32),
+        Object::Real(v) => Some(*v),
+        _ => None,
+    }
 }
 
 /// G3: per-edit Standard 14 BaseFont selection and resource-name
@@ -303,6 +372,39 @@ fn resolve_family(font_family: Option<&str>) -> Family {
     }
 }
 
+/// True when a requested family string IS the Standard 14 family it
+/// will resolve to — i.e. using Helvetica/Times/Courier for it is
+/// faithful, not a substitution. Empty/missing counts as faithful
+/// (the designed Helvetica default, nothing was requested). Anything
+/// else (Calibri, Arial, Georgia, custom families…) resolving to a
+/// Standard 14 face is a substitution and must be recorded.
+fn family_is_faithful_standard14(family: &str) -> bool {
+    let s = family.to_ascii_lowercase();
+    s.trim().is_empty()
+        || s.contains("helvetica")
+        || s.contains("times")
+        || s.contains("courier")
+}
+
+/// Primary family from a possibly-CSS-stack family string:
+/// `'Verdanq', -apple-system, Helvetica` → `Verdanq`.
+///
+/// The `font.substituted` detail format `requested='…'` is PARSED by
+/// the TS severity classifier (saveDegradations.ts severityForArea);
+/// a full stack's own leading quote lands inside the capture and the
+/// classifier — hardened to treat the resulting empty capture as
+/// fidelity — would still lose the family NAME. Emit the primary
+/// token only (mirrors pdfFontResolution.primaryFamily on the TS
+/// side; format pinned by `substitution_detail_format_parses` below).
+fn primary_family(family: &str) -> &str {
+    family
+        .split(',')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+}
+
 /// Map an edit's `(font_family, bold, italic)` to a Standard 14
 /// PostScript BaseFont name.
 ///
@@ -364,10 +466,25 @@ fn assign_font_resources_with_embedded(
     for edit in edits {
         // G2: prefer an embedded font when the edit names one and the
         // EditModel actually carries it.
-        let embedded: Option<(String, EmbeddedFont)> = edit
-            .custom_font_id
-            .as_deref()
-            .and_then(|id| embedded_fonts.get(id).map(|f| (id.to_string(), f.clone())));
+        let embedded: Option<(String, EmbeddedFont)> = match edit.custom_font_id.as_deref() {
+            Some(id) => match embedded_fonts.get(id) {
+                Some(f) => Some((id.to_string(), f.clone())),
+                None => {
+                    // The edit asked for an embedded font but the model
+                    // doesn't carry the payload — Standard-14 fallback
+                    // below. Visible substitution; never silent.
+                    record(
+                        "font.embed_payload_missing",
+                        format!(
+                            "custom_font_id='{id}' paragraph={} has no payload in EditModel.embedded_fonts; falling back to Standard 14",
+                            edit.paragraph_id
+                        ),
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
         if let Some((font_id, payload)) = embedded {
             let resource_name = font_id_to_resource
                 .entry(font_id.clone())
@@ -393,6 +510,22 @@ fn assign_font_resources_with_embedded(
 
         // Standard 14 fallback.
         let basefont = standard14_basefont_for_edit(edit).to_string();
+        // Substitution observability: resolve_family collapses any
+        // unknown family (Calibri, Arial, Georgia, …) onto a Standard
+        // 14 face. Record whenever the REQUESTED family isn't genuinely
+        // the Standard 14 family we end up using. Empty/missing family
+        // is the designed default (Helvetica), not a substitution.
+        let requested = edit.font_family.as_deref().unwrap_or("");
+        if !family_is_faithful_standard14(requested) {
+            record(
+                "font.substituted",
+                format!(
+                    "requested='{}' used='{basefont}' paragraph={}",
+                    primary_family(requested),
+                    edit.paragraph_id
+                ),
+            );
+        }
         let resource = basefont_to_resource
             .entry(basefont)
             .or_insert_with(|| {
@@ -421,12 +554,24 @@ fn assign_font_resources_with_embedded(
 /// per-edit font assignments. Same alignment + multi-line logic as
 /// pre-G3 (G1 line splitting + Tw justify); only the `/<name> <size> Tf`
 /// switches per variant.
-fn build_overlay_stream_v2(edits: &[ParagraphEdit], assignments: &FontAssignments) -> Vec<u8> {
+fn build_overlay_stream_v2(
+    edits: &[ParagraphEdit],
+    assignments: &FontAssignments,
+) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(edits.len() * 160);
     for (i, edit) in edits.iter().enumerate() {
-        let (bg_r, bg_g, bg_b) =
-            parse_color(edit.background_color.as_deref()).unwrap_or((1.0, 1.0, 1.0));
-        let (fg_r, fg_g, fg_b) = parse_color(edit.color.as_deref()).unwrap_or((0.0, 0.0, 0.0));
+        let (bg_r, bg_g, bg_b) = resolve_color_or_default(
+            edit.background_color.as_deref(),
+            (1.0, 1.0, 1.0),
+            &edit.paragraph_id,
+            "background",
+        );
+        let (fg_r, fg_g, fg_b) = resolve_color_or_default(
+            edit.color.as_deref(),
+            (0.0, 0.0, 0.0),
+            &edit.paragraph_id,
+            "text",
+        );
         let has_text = !edit.new_text.is_empty();
         let resource_name = assignments
             .per_edit_resource
@@ -445,12 +590,10 @@ fn build_overlay_stream_v2(edits: &[ParagraphEdit], assignments: &FontAssignment
         // G2: when this edit routes through an embedded font, look up
         // its payload so write_edit_block can use the cmap + hmtx.
         let embedded_payload = match &kind {
-            EditFontKind::Embedded { .. } => assignments
-                .embedded_to_resource
-                .get(&resource_name)
-                .cloned(),
+            EditFontKind::Embedded { .. } => assignments.embedded_to_resource.get(&resource_name),
             _ => None,
         };
+        ensure_replacement_text_encodable(edit, embedded_payload)?;
         let _ = write_edit_block(
             &mut out,
             edit,
@@ -461,10 +604,78 @@ fn build_overlay_stream_v2(edits: &[ParagraphEdit], assignments: &FontAssignment
                 None
             },
             &resource_name,
-            embedded_payload.as_ref(),
+            embedded_payload,
         );
     }
-    out
+    Ok(out)
+}
+
+/// Resolve an optional color spec with a recorded degradation when a
+/// spec WAS provided but doesn't parse. A missing spec is the
+/// designed default (white mask / black text) — no record.
+fn resolve_color_or_default(
+    spec: Option<&str>,
+    default: (f32, f32, f32),
+    paragraph_id: &str,
+    which: &str,
+) -> (f32, f32, f32) {
+    match spec {
+        None => default,
+        Some(s) => match parse_color(Some(s)) {
+            Some(c) => c,
+            None => {
+                record(
+                    "color.parse_failed_default",
+                    format!("{which} color '{s}' unparseable for paragraph {paragraph_id}; using default"),
+                );
+                default
+            }
+        },
+    }
+}
+
+fn ensure_replacement_text_encodable(
+    edit: &ParagraphEdit,
+    embedded: Option<&EmbeddedFontPayload>,
+) -> Result<()> {
+    if edit.new_text.is_empty() {
+        return Ok(());
+    }
+
+    let wanted = edit
+        .new_text
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .count();
+    if wanted == 0 {
+        return Ok(());
+    }
+
+    let normalized = edit.new_text.replace("\r\n", "\n").replace('\r', "\n");
+    let encoded: usize = if let Some(payload) = embedded {
+        let face = ttf_parser::Face::parse(&payload.bytes, 0).ok();
+        normalized
+            .split('\n')
+            .map(|line| match encode_cids(line, face.as_ref()) {
+                LineEncoding::Cids(cids) => cids.len() / 2,
+                LineEncoding::WinAnsi(bytes) => bytes.len(),
+            })
+            .sum()
+    } else {
+        normalized
+            .split('\n')
+            .map(|line| encode_winansi(line).len())
+            .sum()
+    };
+
+    if encoded < wanted {
+        return Err(AppError::Pdf(format!(
+            "paragraph overlay fallback cannot encode replacement text for {} \
+             (encoded {encoded}/{wanted} glyphs); refusing a mask-only or partial-text save",
+            edit.paragraph_id,
+        )));
+    }
+    Ok(())
 }
 
 /// Concatenate per-paragraph mask-rect + text-draw blocks into a
@@ -478,7 +689,12 @@ fn build_overlay_stream_v2(edits: &[ParagraphEdit], assignments: &FontAssignment
 /// bold/italic variants get their own Type1 font dicts. This function
 /// is kept for back-compat with the existing test suite — it always
 /// uses /Helvetica regardless of edit flags.
-#[allow(dead_code)]
+///
+/// **Session-1 audit:** test-only. Unlike the v2 builder it is NOT
+/// guarded by `ensure_replacement_text_encodable`, so it must never
+/// return to production — gated `#[cfg(test)]` to make that a
+/// compile-time fact rather than a convention.
+#[cfg(test)]
 fn build_overlay_stream(edits: &[ParagraphEdit], overlay_font_name: &str) -> (Vec<u8>, bool) {
     let mut out = Vec::with_capacity(edits.len() * 160);
     let mut needs_font = false;
@@ -535,7 +751,8 @@ fn write_edit_block(
 ) -> std::io::Result<bool> {
     use std::io::Write;
     writeln!(out, "q")?;
-    // Mask rect — always emitted.
+    // Mask rect — always emitted. Add Text boxes pass a zero-sized
+    // maskBbox from the frontend so there is no source area to erase.
     writeln!(
         out,
         "{} {} {} rg",
@@ -546,16 +763,20 @@ fn write_edit_block(
     writeln!(
         out,
         "{} {} {} {} re",
-        fmt_real(edit.bbox.x),
-        fmt_real(edit.bbox.y),
-        fmt_real(edit.bbox.width),
-        fmt_real(edit.bbox.height)
+        fmt_real(edit.mask_bbox.as_ref().unwrap_or(&edit.bbox).x),
+        fmt_real(edit.mask_bbox.as_ref().unwrap_or(&edit.bbox).y),
+        fmt_real(edit.mask_bbox.as_ref().unwrap_or(&edit.bbox).width),
+        fmt_real(edit.mask_bbox.as_ref().unwrap_or(&edit.bbox).height)
     )?;
     writeln!(out, "f")?;
 
     // Text draw (if any)
     let mut emitted_text = false;
     if let Some((r, g, b)) = fg_color {
+        let (dx, dy) = match edit.position_delta {
+            Some(ref d) => (d.dx, d.dy),
+            None => (0.0, 0.0),
+        };
         // G2: when an embedded font payload is supplied, encode each
         // line as 2-byte CIDs via the font's cmap; otherwise fall
         // through to WinAnsi byte encoding for Standard 14.
@@ -582,10 +803,50 @@ fn write_edit_block(
             })
             .collect();
 
+        // Tripwire: the v2 production path is guarded by
+        // ensure_replacement_text_encodable (errors before reaching
+        // here), so a drop detected at emission means the guard was
+        // bypassed — record it so a silent character loss can never
+        // pass a strict gate unnoticed.
+        let wanted_glyphs = edit
+            .new_text
+            .chars()
+            .filter(|c| *c != '\n' && *c != '\r')
+            .count();
+        let encoded_glyphs: usize = line_encodings
+            .iter()
+            .map(|enc| match enc {
+                LineEncoding::WinAnsi(b) => b.len(),
+                LineEncoding::Cids(cids) => cids.len() / 2,
+            })
+            .sum();
+        if encoded_glyphs < wanted_glyphs {
+            record(
+                "encoding.char_dropped",
+                format!(
+                    "paragraph {}: {} of {} characters not encodable in the overlay font and dropped",
+                    edit.paragraph_id,
+                    wanted_glyphs - encoded_glyphs,
+                    wanted_glyphs
+                ),
+            );
+        }
+
         // Skip text-draw if NOTHING from the string encoded cleanly.
         // An empty PDF literal string is valid but wastes a few bytes.
         let any_line_nonempty = lines.iter().any(|l| !l.is_empty());
         if any_line_nonempty {
+            writeln!(out, "q")?;
+            writeln!(
+                out,
+                "{} {} {} {} re",
+                fmt_real(edit.bbox.x + dx),
+                fmt_real(edit.bbox.y - dy),
+                fmt_real(edit.bbox.width),
+                fmt_real(edit.bbox.height)
+            )?;
+            writeln!(out, "W")?;
+            writeln!(out, "n")?;
             writeln!(out, "{} {} {} rg", fmt_real(r), fmt_real(g), fmt_real(b))?;
             writeln!(out, "BT")?;
             writeln!(
@@ -606,15 +867,16 @@ fn write_edit_block(
             // PDF coords by negating dy so "drag down" = smaller PDF y.
             // The mask rect above STAYS at the original bbox so it
             // covers the unmoved original glyphs; only the new text is
-            // drawn at the offset position.
-            let (dx, dy) = match edit.position_delta {
-                Some(ref d) => (d.dx, d.dy),
-                None => (0.0, 0.0),
-            };
+            // drawn and clipped at the offset position.
             let first_baseline_y = edit.bbox.y + edit.bbox.height - edit.font_size * 0.85 - dy;
             // Default Helvetica leading is 1.2× em — matches what
-            // Acrobat / Word emit when the user hits Enter.
-            let line_height = edit.font_size * 1.2;
+            // Acrobat / Word emit when the user hits Enter. User
+            // line-spacing changes ride in `line_height`.
+            let line_height_multiplier = edit
+                .line_height
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(1.2);
+            let line_height = edit.font_size * line_height_multiplier;
             let align = edit.align.unwrap_or(TextAlign::Left);
             // Index of the LAST non-empty line. Justify treats this
             // line as left-aligned (standard typesetting rule —
@@ -630,6 +892,7 @@ fn write_edit_block(
             // Track whether we've issued a non-zero `Tw` so we know
             // to reset it before emitting a non-justified line.
             let mut tw_active = false;
+            let mut text_decorations: Vec<(f32, f32, f32)> = Vec::new();
 
             // G1-extended: pick the right per-family AFM table based on
             // the edit's resolved family + bold flag. For embedded
@@ -686,6 +949,13 @@ fn write_edit_block(
                         tw_active = true;
                     } else {
                         // No spaces to widen — fall back to left.
+                        record(
+                            "layout.justify_no_spaces",
+                            format!(
+                                "paragraph {}: justified line {} has no spaces; rendered left-aligned",
+                                edit.paragraph_id, i
+                            ),
+                        );
                         if tw_active {
                             writeln!(out, "0 Tw")?;
                             tw_active = false;
@@ -732,6 +1002,17 @@ fn write_edit_block(
                         out.extend_from_slice(b"> Tj\n");
                     }
                 }
+                if edit.underline || edit.strikethrough {
+                    let decoration_width = if matches!(align, TextAlign::Justify)
+                        && !is_last_text_line
+                        && natural_w < edit.bbox.width
+                    {
+                        edit.bbox.width
+                    } else {
+                        natural_w.min(edit.bbox.width).max(0.0)
+                    };
+                    text_decorations.push((baseline_x, baseline_y, decoration_width));
+                }
                 emitted_text = true;
             }
 
@@ -744,6 +1025,39 @@ fn write_edit_block(
             }
 
             writeln!(out, "ET")?;
+            if !text_decorations.is_empty() {
+                let thickness = (edit.font_size / 16.0).max(0.5);
+                writeln!(out, "{} w", fmt_real(thickness))?;
+                writeln!(out, "{} {} {} RG", fmt_real(r), fmt_real(g), fmt_real(b))?;
+                for (baseline_x, baseline_y, width) in text_decorations {
+                    if width <= 0.0 {
+                        continue;
+                    }
+                    if edit.underline {
+                        let y = baseline_y - edit.font_size * 0.12;
+                        writeln!(
+                            out,
+                            "{} {} m {} {} l S",
+                            fmt_real(baseline_x),
+                            fmt_real(y),
+                            fmt_real(baseline_x + width),
+                            fmt_real(y)
+                        )?;
+                    }
+                    if edit.strikethrough {
+                        let y = baseline_y + edit.font_size * 0.32;
+                        writeln!(
+                            out,
+                            "{} {} m {} {} l S",
+                            fmt_real(baseline_x),
+                            fmt_real(y),
+                            fmt_real(baseline_x + width),
+                            fmt_real(y)
+                        )?;
+                    }
+                }
+            }
+            writeln!(out, "Q")?;
         }
     }
     writeln!(out, "Q")?;
@@ -1645,6 +1959,7 @@ fn parse_color(spec: Option<&str>) -> Option<(f32, f32, f32)> {
 mod tests {
     use super::*;
     use crate::live::model::{Bbox, ParagraphEdit};
+    use lopdf::dictionary;
 
     fn edit_with_bbox(id: &str, x: f32, y: f32, w: f32, h: f32, bg: Option<&str>) -> ParagraphEdit {
         // Default new_text to empty so existing mask-only tests keep
@@ -1658,6 +1973,7 @@ mod tests {
                 width: w,
                 height: h,
             },
+            mask_bbox: None,
             original_text: "orig".into(),
             new_text: String::new(),
             font_size: 12.0,
@@ -1666,7 +1982,10 @@ mod tests {
             font_family: None,
             bold: false,
             italic: false,
+            underline: false,
+            strikethrough: false,
             align: None,
+            line_height: None,
             item_indices: vec![],
             item_original_texts: vec![],
             position_delta: None,
@@ -1808,6 +2127,32 @@ mod tests {
     }
 
     #[test]
+    fn overlay_stream_v2_rejects_unencodable_replacement_text() {
+        let edit = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "日本語");
+        let assignments = assign_font_resources(&[edit.clone()]);
+        let err = build_overlay_stream_v2(&[edit], &assignments)
+            .expect_err("v2 overlay must not emit mask-only output");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot encode replacement text"),
+            "expected encoding failure, got: {msg}",
+        );
+    }
+
+    #[test]
+    fn overlay_stream_v2_allows_delete_mask_without_text() {
+        let edit = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "");
+        let assignments = assign_font_resources(&[edit.clone()]);
+        let stream = build_overlay_stream_v2(&[edit], &assignments).expect("delete mask");
+        let s = std::str::from_utf8(&stream).expect("ASCII output");
+        assert!(s.contains("0 0 100 14 re"));
+        assert!(
+            !s.contains("BT\n"),
+            "delete should mask without drawing text: {s}"
+        );
+    }
+
+    #[test]
     fn fmt_real_trims_trailing_zeros() {
         assert_eq!(fmt_real(1.5), "1.5");
         assert_eq!(fmt_real(1.0), "1");
@@ -1833,6 +2178,35 @@ mod tests {
             encode_winansi("\u{20AC}\u{201C}hi\u{201D}"),
             &[0x80, 0x93, b'h', b'i', 0x94]
         );
+    }
+
+    #[test]
+    fn winansi_specials_table_pinned_cross_language() {
+        // CROSS-LANGUAGE PIN (Session 4): exactly these 27 codepoints
+        // are the cp1252 specials encode_winansi maps into 0x80-0x9F.
+        // The TS WinAnsi mirror (winAnsiCoversCodepoint in
+        // pdfEngineBake.ts, pinned by test-winansi-mirror.mjs) carries
+        // the SAME list — drift between the tables changes which texts
+        // the save-time unicode escalation fires for.
+        let specials: [char; 27] = [
+            '\u{20AC}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}',
+            '\u{2021}', '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}',
+            '\u{017D}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}',
+            '\u{2013}', '\u{2014}', '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}',
+            '\u{0153}', '\u{017E}', '\u{0178}',
+        ];
+        for c in specials {
+            assert_eq!(
+                encode_winansi(&c.to_string()).len(),
+                1,
+                "U+{:04X} must encode to exactly one cp1252 byte",
+                c as u32
+            );
+        }
+        // And a representative just OUTSIDE the table drops (the TS
+        // mirror reports it uncovered → escalation, never silence).
+        assert!(encode_winansi("\u{03A9}").is_empty());
+        assert!(encode_winansi("\u{4E2D}").is_empty());
     }
 
     // ── G1 alignment tests ─────────────────────────────────────────
@@ -2008,6 +2382,72 @@ mod tests {
         // Line height should be ~font_size * 1.2 = 14.4
         let dy = tms[0].1 - tms[1].1;
         assert!((dy - 14.4).abs() < 0.1, "expected line gap ~14.4, got {dy}");
+    }
+
+    #[test]
+    fn multiline_honors_explicit_line_height() {
+        let mut edit = edit_with_text("p1", 0.0, 700.0, 200.0, 80.0, "Line 1\nLine 2");
+        edit.font_size = 10.0;
+        edit.line_height = Some(2.0);
+        let (stream, _) = build_overlay_stream(&[edit], "Ovl0");
+        let s = std::str::from_utf8(&stream).expect("ASCII");
+        let tms = extract_tms(s);
+        assert_eq!(tms.len(), 2, "two lines: {s}");
+        let dy = tms[0].1 - tms[1].1;
+        assert!((dy - 20.0).abs() < 0.1, "expected line gap 20.0, got {dy}");
+    }
+
+    #[test]
+    fn overlay_text_draw_is_clipped_to_paragraph_bbox() {
+        let mut edit = edit_with_text("p1", 10.0, 20.0, 30.0, 12.0, "Huge");
+        edit.font_size = 72.0;
+        let (stream, _) = build_overlay_stream(&[edit], "Ovl0");
+        let s = std::str::from_utf8(&stream).expect("ASCII");
+        assert_eq!(
+            s.matches("10 20 30 12 re").count(),
+            2,
+            "mask rect and text clip rect should both use the paragraph bbox: {s}",
+        );
+        let clip_idx = s
+            .find("\nW\nn\n")
+            .expect("text block should install a clip path");
+        let text_idx = s
+            .find("\nBT\n")
+            .expect("text block should begin after clip path");
+        assert!(
+            clip_idx < text_idx,
+            "clip path must be installed before drawing text: {s}"
+        );
+    }
+
+    #[test]
+    fn moved_autogrown_text_masks_source_but_clips_destination() {
+        let mut edit = edit_with_text("p1", 10.0, 20.0, 120.0, 52.0, "Moved huge text");
+        edit.font_size = 44.0;
+        edit.mask_bbox = Some(Bbox {
+            x: 10.0,
+            y: 55.0,
+            width: 70.0,
+            height: 14.0,
+        });
+        edit.position_delta = Some(crate::live::PositionDelta {
+            dx: 160.0,
+            dy: 90.0,
+        });
+        let (stream, _) = build_overlay_stream(&[edit], "Ovl0");
+        let s = std::str::from_utf8(&stream).expect("ASCII");
+        assert!(
+            s.contains("10 55 70 14 re"),
+            "source mask should use original glyph bbox, not grown draw bbox: {s}",
+        );
+        assert!(
+            s.contains("170 -70 120 52 re"),
+            "text clip should move with destination bbox: {s}",
+        );
+        assert!(
+            s.contains("1 0 0 1 170 "),
+            "text baseline x should move with destination bbox: {s}",
+        );
     }
 
     // ── G3 font-variant tests ──────────────────────────────────────
@@ -2203,7 +2643,7 @@ mod tests {
             },
         );
         let assignments = assign_font_resources_with_embedded(&[e.clone()], &embedded);
-        let stream = build_overlay_stream_v2(&[e], &assignments);
+        let stream = build_overlay_stream_v2(&[e], &assignments).expect("overlay stream");
         let s = std::str::from_utf8(&stream).expect("ASCII content stream");
         // Embedded path must emit `<HEX> Tj`, NOT `(literal) Tj`.
         assert!(
@@ -2280,7 +2720,7 @@ mod tests {
         let expected_x = 50.0 + (200.0 - times_w);
 
         let assignments = assign_font_resources(&[edit.clone()]);
-        let stream = build_overlay_stream_v2(&[edit], &assignments);
+        let stream = build_overlay_stream_v2(&[edit], &assignments).expect("overlay stream");
         let s = std::str::from_utf8(&stream).expect("ASCII");
         let tms = extract_tms(s);
         assert_eq!(tms.len(), 1);
@@ -2361,7 +2801,7 @@ mod tests {
         let mut bold = edit_with_text("p1", 50.0, 700.0, 200.0, 14.0, "Bold text");
         bold.bold = true;
         let assignments = assign_font_resources(&[bold.clone()]);
-        let stream = build_overlay_stream_v2(&[bold], &assignments);
+        let stream = build_overlay_stream_v2(&[bold], &assignments).expect("overlay stream");
         let s = std::str::from_utf8(&stream).expect("ASCII");
         let bold_resource = &assignments.basefont_to_resource["Helvetica-Bold"];
         assert!(
@@ -2387,6 +2827,238 @@ mod tests {
         assert!(
             (dy - 28.8).abs() < 0.1,
             "blank line should still consume a line height: dy={dy}, stream:\n{s}"
+        );
+    }
+
+    // ── Session-1 degradation-channel recording ──────────────────
+
+    use satchel_core::fallback;
+
+    #[test]
+    fn substitution_recorded_for_unknown_family() {
+        let mut e = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "Hello");
+        e.font_family = Some("Calibri".into());
+        let empty = HashMap::new();
+        let (_, events) =
+            fallback::capture(|| assign_font_resources_with_embedded(&[e], &empty));
+        let subs: Vec<_> = events
+            .iter()
+            .filter(|ev| ev.area == "font.substituted")
+            .collect();
+        assert_eq!(subs.len(), 1, "expected one substitution event: {events:?}");
+        assert!(subs[0].detail.contains("requested='Calibri'"));
+        assert!(subs[0].detail.contains("used='Helvetica'"));
+        assert!(subs[0].detail.contains("paragraph=p1"));
+    }
+
+    #[test]
+    fn no_substitution_recorded_for_faithful_families() {
+        let empty = HashMap::new();
+        for family in [None, Some("Helvetica"), Some("Times New Roman"), Some("Courier New"), Some("")] {
+            let mut e = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "Hello");
+            e.font_family = family.map(str::to_string);
+            let (_, events) =
+                fallback::capture(|| assign_font_resources_with_embedded(&[e], &empty));
+            assert!(
+                events.is_empty(),
+                "family {family:?} is faithful/default — no event expected, got {events:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_embed_payload_recorded() {
+        let mut e = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "Hello");
+        e.custom_font_id = Some("opensans-regular".into());
+        let empty = HashMap::new();
+        let (_, events) =
+            fallback::capture(|| assign_font_resources_with_embedded(&[e], &empty));
+        assert!(
+            events
+                .iter()
+                .any(|ev| ev.area == "font.embed_payload_missing"
+                    && ev.detail.contains("opensans-regular")),
+            "expected font.embed_payload_missing: {events:?}"
+        );
+    }
+
+    #[test]
+    fn substitution_detail_format_parses() {
+        // FORMAT PIN (Session 4, assigned Session-2 debt): the TS
+        // severity classifier parses requested='…' out of the detail;
+        // a drift here silently downgrades fidelity→info on the TS
+        // side. The capture must be NON-EMPTY and the bare primary
+        // family even when font_family arrives as a quoted CSS stack
+        // (whose own leading quote used to poison the capture).
+        let mut e = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "Hello");
+        e.font_family = Some("'Verdanq', -apple-system, 'Segoe UI', sans-serif-ish".into());
+        let empty = HashMap::new();
+        let (_, events) =
+            fallback::capture(|| assign_font_resources_with_embedded(&[e], &empty));
+        let sub = events
+            .iter()
+            .find(|ev| ev.area == "font.substituted")
+            .expect("stack without a Std-14 token must record font.substituted");
+        // Same regex shape the TS classifier uses.
+        let start = sub
+            .detail
+            .find("requested='")
+            .expect("detail carries requested='")
+            + "requested='".len();
+        let end = sub.detail[start..]
+            .find('\'')
+            .map(|i| start + i)
+            .expect("requested capture closes");
+        assert_eq!(
+            &sub.detail[start..end],
+            "Verdanq",
+            "capture must be the bare primary family: {}",
+            sub.detail
+        );
+    }
+
+    #[test]
+    fn primary_family_strips_stack_and_quotes() {
+        assert_eq!(primary_family("'Verdanq', Helvetica"), "Verdanq");
+        assert_eq!(primary_family("\"Open Sans\", serif"), "Open Sans");
+        assert_eq!(primary_family("Lato"), "Lato");
+        assert_eq!(primary_family(""), "");
+    }
+
+    #[test]
+    fn v2_builder_records_nothing_on_clean_encodable_edit() {
+        // Faithful family, encodable ASCII, valid colors, left align:
+        // the strict-pass baseline — ZERO events.
+        let mut e = edit_with_text("p1", 10.0, 700.0, 300.0, 20.0, "Plain ASCII text");
+        e.background_color = Some("#FFFFFF".into());
+        e.color = Some("#000000".into());
+        let empty = HashMap::new();
+        let (result, events) = fallback::capture(|| {
+            let assignments = assign_font_resources_with_embedded(
+                std::slice::from_ref(&e),
+                &empty,
+            );
+            build_overlay_stream_v2(std::slice::from_ref(&e), &assignments)
+        });
+        assert!(result.is_ok());
+        assert!(
+            events.is_empty(),
+            "clean edit must record nothing: {events:?}"
+        );
+    }
+
+    #[test]
+    fn justify_without_spaces_recorded() {
+        // Two lines; the FIRST (non-last) justified line has no
+        // spaces → Tw fallback to left-aligned, recorded.
+        let mut e = edit_with_text("p1", 10.0, 700.0, 500.0, 40.0, "NoSpacesInThisLine\nshort tail");
+        e.align = Some(TextAlign::Justify);
+        let empty = HashMap::new();
+        let (result, events) = fallback::capture(|| {
+            let assignments = assign_font_resources_with_embedded(
+                std::slice::from_ref(&e),
+                &empty,
+            );
+            build_overlay_stream_v2(std::slice::from_ref(&e), &assignments)
+        });
+        assert!(result.is_ok());
+        assert!(
+            events
+                .iter()
+                .any(|ev| ev.area == "layout.justify_no_spaces" && ev.detail.contains("p1")),
+            "expected layout.justify_no_spaces: {events:?}"
+        );
+    }
+
+    #[test]
+    fn unparseable_color_recorded_missing_color_silent() {
+        let empty = HashMap::new();
+        // Present-but-garbage color records:
+        let mut bad = edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "x");
+        bad.background_color = Some("chartreuse-ish".into());
+        let (_, events) = fallback::capture(|| {
+            let a = assign_font_resources_with_embedded(std::slice::from_ref(&bad), &empty);
+            build_overlay_stream_v2(std::slice::from_ref(&bad), &a)
+        });
+        assert!(
+            events.iter().any(|ev| ev.area == "color.parse_failed_default"
+                && ev.detail.contains("chartreuse-ish")),
+            "expected color.parse_failed_default: {events:?}"
+        );
+        // Absent color is the designed default — silent:
+        let none = edit_with_text("p2", 0.0, 0.0, 100.0, 14.0, "x");
+        let (_, events) = fallback::capture(|| {
+            let a = assign_font_resources_with_embedded(std::slice::from_ref(&none), &empty);
+            build_overlay_stream_v2(std::slice::from_ref(&none), &a)
+        });
+        assert!(
+            events.is_empty(),
+            "missing color must stay silent: {events:?}"
+        );
+    }
+
+    #[test]
+    fn media_box_height_resolves_indirect_reference() {
+        // pdfium's writer emits MediaBox as an indirect reference after
+        // content regeneration — the un-dereferenced lookup defaulted
+        // to 792pt and visually lost edited text on A4 pages.
+        let mut doc = Document::with_version("1.7");
+        let mb_id = doc.add_object(Object::Array(vec![
+            Object::Integer(0),
+            Object::Integer(0),
+            Object::Real(595.28),
+            Object::Real(841.89),
+        ]));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "MediaBox" => Object::Reference(mb_id),
+        });
+        let h = media_box_height(&doc, page_id).expect("height resolves through the reference");
+        assert!((h - 841.89).abs() < 0.01, "got {h}");
+    }
+
+    #[test]
+    fn media_box_height_accepts_integer_entries() {
+        // Integer-valued MediaBox ([0 0 612 792]) is common; as_f32 is
+        // Real-only in lopdf, so the old code returned None for it.
+        let mut doc = Document::with_version("1.7");
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "MediaBox" => Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ]),
+        });
+        let h = media_box_height(&doc, page_id).expect("integer entries accepted");
+        assert!((h - 842.0).abs() < 0.01, "got {h}");
+    }
+
+    #[test]
+    fn page_height_parse_failure_recorded() {
+        // Garbage bytes: read_page_heights fails → recorded; the bake
+        // itself may also fail downstream — the EVENT is the contract.
+        let mut pages = HashMap::new();
+        pages.insert(
+            0u32,
+            crate::live::PageEdits {
+                paragraphs: vec![edit_with_text("p1", 0.0, 0.0, 100.0, 14.0, "x")],
+            },
+        );
+        let model = EditModel {
+            source_hash: String::new(),
+            pages,
+            version: 1,
+            embedded_fonts: HashMap::new(),
+        };
+        let (_, events) =
+            fallback::capture(|| bake_edit_model(b"not a pdf at all", &model));
+        assert!(
+            events
+                .iter()
+                .any(|ev| ev.area == "geometry.page_height_unavailable"),
+            "expected geometry.page_height_unavailable: {events:?}"
         );
     }
 }
